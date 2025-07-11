@@ -13,7 +13,9 @@ data = yf.download(ticker, interval="15m", period="1d")
 
 # VWAP Calculation
 data['TypicalPrice'] = (data['High'] + data['Low']) / 2
-data['VWAP'] = (data['TypicalPrice'] * data['Volume']).cumsum() / data['Volume'].cumsum()
+data['VWAP'] = (
+    data['TypicalPrice'].astype(float) * data['Volume'].astype(float)
+).cumsum() / data['Volume'].astype(float).cumsum()
 
 # Initial Balance (9:15–10:15)
 ib = data.between_time("09:15", "10:15")
