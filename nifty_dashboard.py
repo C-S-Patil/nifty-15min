@@ -24,7 +24,7 @@ vwap = (typical_price * data['Volume']).cumsum() / data['Volume'].cumsum()
 data['VWAP'] = vwap
 
 # Initial Balance (9:15–10:15)
-ib = data.between_time("09:15", "10:15")
+ib = data.between_time("03:45", "4:45")
 if not ib.empty:
     ib_high = ib['High'].max()
     ib_low = ib['Low'].min()
