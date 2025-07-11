@@ -37,7 +37,7 @@ def get_signal(row):
         return "Buy"
     elif ib_low[0] and row['Close'][0] < row['VWAP'][0] and row['Close'][0] < ib_low[0]:
         return "Sell"
-    return "-"
+    return ""
 
 data['Signal'] = data.apply(get_signal, axis=1)
 
