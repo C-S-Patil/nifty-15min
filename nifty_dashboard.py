@@ -1,61 +1,87 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
-import streamlit as st
-import matplotlib.pyplot as plt
+import numpy as np
+import ta
+import datetime
+import requests
 
-st.set_page_config(page_title="Nifty VWAP Dashboard", layout="wide")
-st.title("📊 Nifty 15-Min VWAP Dashboard with Entry/Exit Signals")
+# -----------------------------
+# CONFIGURE YOUR TELEGRAM BOT
+# -----------------------------
+TELEGRAM_BOT_TOKEN = "8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA"
+TELEGRAM_CHAT_ID = "951733992"
 
-# Download 15-min data from yfinance
-ticker = "NIFTYBEES.NS"
-data = yf.download(ticker, interval="15m", period="1d", progress=False)
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+    try:
+        requests.post(url, data=data)
+    except Exception as e:
+        st.error(f"Failed to send Telegram message: {e}")
 
-# Ensure columns are present and clean
-# required_cols = ['(\'Open\', \'NIFTYBEES.NS\')', '(\'High\', \'NIFTYBEES.NS\')', '(\'Low\', \'NIFTYBEES.NS\')', '(\'Close\', \'NIFTYBEES.NS\')', '(\'Volume\', \'NIFTYBEES.NS\')']
-# if not all(col in data.columns for col in required_cols):
-#     st.error("⚠️ Missing columns in data. Cannot proceed.")
-#     st.stop()
+# -----------------------------
+# UI SETUP
+# -----------------------------
+st.set_page_config(page_title="Market Dashboard", layout="wide")
+st.title("📈 Nifty 15-Min Dashboard with Signals")
 
-# data.dropna(subset=required_cols, inplace=True)
+symbol_map = {
+    "Nifty": "^NSEI",
+    "BankNifty": "^NSEBANK",
+    "Reliance": "RELIANCE.NS",
+    "TCS": "TCS.NS",
+    "Infosys": "INFY.NS"
+}
 
-# ✅ Calculate VWAP using numeric Series only
-typical_price = (data['High'] + data['Low']) / 2
-vwap = (typical_price * data['Volume']).cumsum() / data['Volume'].cumsum()
-data['VWAP'] = vwap
+selected_symbol = st.selectbox("Select Instrument", list(symbol_map.keys()))
+ticker = symbol_map[selected_symbol]
 
-# Initial Balance (9:15–10:15)
-ib = data.between_time("03:45", "4:45")
-if not ib.empty:
-    ib_high = ib['High'].max()
-    ib_low = ib['Low'].min()
-else:
-    ib_high = ib_low = None
+# -----------------------------
+# FETCH DATA
+# -----------------------------
+@st.cache_data(ttl=300)
+def load_data():
+    data = yf.download(ticker, interval="15m", period="1d")
+    data.dropna(inplace=True)
+    data["TypicalPrice"] = (data["High"] + data["Low"] + data["Close"]) / 3
+    data["VWAP"] = (data["TypicalPrice"] * data["Volume"]).cumsum() / data["Volume"].cumsum()
+    data["RSI"] = ta.momentum.RSIIndicator(data["Close"], window=14).rsi()
+    return data
 
-# Generate Entry/Exit Signal
-def get_signal(row):
-    if ib_high[0] and row['Close'][0] > row['VWAP'][0] and row['Close'][0] > ib_high[0]:
+data = load_data()
+
+# -----------------------------
+# SIGNAL LOGIC
+# -----------------------------
+def generate_signal(row):
+    if row["Close"][0] > row["VWAP"][0] and row["RSI"][0] < 30:
         return "Buy"
-    elif ib_low[0] and row['Close'][0] < row['VWAP'][0] and row['Close'][0] < ib_low[0]:
+    elif row["Close"][0] < row["VWAP"][0] and row["RSI"][0] > 70:
         return "Sell"
-    return ""
+    else:
+        return "Hold"
 
-data['Signal'] = data.apply(get_signal, axis=1)
+data["Signal"] = data.apply(generate_signal, axis=1)
+latest = data.iloc[-1]
 
-# Display Initial Balance
-if ib_high[0] and ib_low[0]:
-    st.markdown(f"### 📌 Initial Balance: High = **{ib_high[0]:.2f}**, Low = **{ib_low[0]:.2f}**")
+# -----------------------------
+# DASHBOARD VIEW
+# -----------------------------
+st.subheader(f"Latest 15-min Candle: {selected_symbol}")
+st.write(latest[["Open", "High", "Low", "Close", "VWAP", "RSI", "Signal"]])
+
+# Signal Notification
+if latest["Signal"] in ["Buy", "Sell"]:
+    msg = f"{selected_symbol} Signal Alert ({datetime.datetime.now().strftime('%H:%M')}): {latest['Signal']}\nPrice: {latest['Close']:.2f}, VWAP: {latest['VWAP']:.2f}, RSI: {latest['RSI']:.2f}"
+    st.success(msg)
+    send_telegram_message(msg)
 else:
-    st.warning("Initial Balance could not be calculated (possibly due to time cutoff).")
+    st.info("No signal currently. Holding position.")
 
-# Show latest data
-st.subheader("📋 Latest 5 Candles with Signal")
-st.dataframe(data[['Open', 'High', 'Low', 'Close', 'VWAP', 'Signal']].tail(5), use_container_width=True)
+# Chart
+st.line_chart(data[["Close", "VWAP"]].dropna())
 
-# Plot VWAP vs Close
-st.subheader("📈 Close vs VWAP")
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.plot(data.index, data['Close'], label='Close', color='blue')
-ax.plot(data.index, data['VWAP'], label='VWAP', color='orange', linestyle='--')
-ax.set_title("VWAP vs Close (15-min Candle)")
-ax.legend()
-st.pyplot(fig)
+# -----------------------------
+# END
+# -----------------------------
