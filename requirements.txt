@@ -1,5 +1,6 @@
-
 streamlit
 yfinance
 pandas
-matplotlib
+numpy
+requests
+python-telegram-bot==13.15
