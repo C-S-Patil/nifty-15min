@@ -15,14 +15,14 @@ st.set_page_config(
 # Add near the top of app.py after st.set_page_config()
 if "startup_ping_sent" not in st.session_state:
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        url = f"https://api.telegram.org/bot8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA/sendMessage"
         test_msg = (
             "🚀 *App Startup Alert*\n\nStreamlit Dashboard initialized! 🟢"
         )
         requests.post(
             url,
             data={
-                "chat_id": TELEGRAM_CHAT_ID,
+                "chat_id": 951733992,
                 "text": test_msg,
                 "parse_mode": "Markdown",
             },
