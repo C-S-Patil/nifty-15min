@@ -22,6 +22,6 @@ jobs:
 
       - name: Run Market Scan
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: 8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA
+          TELEGRAM_CHAT_ID: 951733992
         run: python scanner.py
