@@ -1,12 +1,15 @@
-name: Market Scanner Cron
+name: Hourly Health Check & Scanner
 
 on:
   schedule:
+    # Runs at minute 0 past every hour (Hourly cron)
+    - cron: '0 * * * *'
+    # Also runs every 15 mins during market hours for trade triggers
     - cron: '*/15 3-9 * * 1-5'
   workflow_dispatch:
 
 jobs:
-  scan:
+  health-check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
@@ -18,10 +21,12 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run Market Scan
+      - name: Run Hourly Health Check
         env:
           TELEGRAM_BOT_TOKEN: 8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA
           TELEGRAM_CHAT_ID: 951733992
-        run: python scanner.py
+        run: python health_check.py
