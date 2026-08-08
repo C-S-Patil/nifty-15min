@@ -12,6 +12,26 @@ st.set_page_config(
     layout="wide",
 )
 
+# Add near the top of app.py after st.set_page_config()
+if "startup_ping_sent" not in st.session_state:
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        test_msg = (
+            "🚀 *App Startup Alert*\n\nStreamlit Dashboard initialized! 🟢"
+        )
+        requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": test_msg,
+                "parse_mode": "Markdown",
+            },
+            timeout=5,
+        )
+        st.session_state["startup_ping_sent"] = True
+    except Exception as e:
+        st.sidebar.warning(f"Startup ping failed: {e}")
+
 st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
 
 # Sidebar Setup
