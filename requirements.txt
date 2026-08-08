@@ -1,6 +1,6 @@
-streamlit
-yfinance
-pandas
-numpy
-requests
-python-telegram-bot==13.15
+streamlit>=1.30.0
+yfinance>=0.2.35
+pandas>=2.0.0
+numpy>=1.24.0
+ta>=0.10.2
+requests>=2.31.0
