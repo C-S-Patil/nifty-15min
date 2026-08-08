@@ -27,6 +27,6 @@ jobs:
 
       - name: Run Hourly Health Check
         env:
-          TELEGRAM_BOT_TOKEN: 8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA
+          TELEGRAM_BOT_TOKEN: 8817567694:AAGo8zFQQXFA64T5Aqazajh5o3VPfQQgshE
           TELEGRAM_CHAT_ID: 951733992
         run: python health_check.py
