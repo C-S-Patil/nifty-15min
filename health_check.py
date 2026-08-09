@@ -4,7 +4,7 @@ import pytz
 import requests
 from strategy_engine import fetch_and_prepare_data
 
-TELEGRAM_BOT_TOKEN = 8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA
+TELEGRAM_BOT_TOKEN = "8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA"
 TELEGRAM_CHAT_ID = 951733992
 
 
