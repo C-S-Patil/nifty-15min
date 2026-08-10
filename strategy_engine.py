@@ -1,64 +1,99 @@
 import numpy as np
 import pandas as pd
+import requests
 import ta
 import yfinance as yf
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", interval: str = "15m", period: str = "60d"
+    ticker: str = "^NSEI", interval: str = "15m", period: str = "10d"
 ) -> pd.DataFrame:
-    """Fetches intraday data and daily trend data to build multi-timeframe indicators."""
-    df_15m = yf.download(
-        ticker, interval=interval, period=period, progress=False
-    )
-    if df_15m.empty:
+    """Fetches intraday and daily data with cloud request headers to avoid Yahoo Finance blocks."""
+    try:
+        # Create a custom session with user-agent to bypass Streamlit Cloud IP blocking
+        session = requests.Session()
+        session.headers.update(
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        )
+
+        # Download Intraday 15-min Data
+        df_15m = yf.download(
+            ticker,
+            interval=interval,
+            period=period,
+            progress=False,
+            session=session,
+        )
+
+        if df_15m.empty:
+            # Fallback retry with period="5d" if "10d" yields empty
+            df_15m = yf.download(
+                ticker,
+                interval=interval,
+                period="5d",
+                progress=False,
+                session=session,
+            )
+
+        if df_15m.empty:
+            print("yfinance returned empty dataset.")
+            return pd.DataFrame()
+
+        # Handle MultiIndex columns from recent yfinance versions
+        if isinstance(df_15m.columns, pd.MultiIndex):
+            df_15m.columns = df_15m.columns.get_level_values(0)
+
+        df_15m.dropna(inplace=True)
+
+        # Download Daily Data for 50 EMA HTF Filter
+        df_daily = yf.download(
+            ticker, interval="1d", period="1y", progress=False, session=session
+        )
+        if isinstance(df_daily.columns, pd.MultiIndex):
+            df_daily.columns = df_daily.columns.get_level_values(0)
+
+        df_daily["Daily_EMA50"] = ta.trend.EMAIndicator(
+            df_daily["Close"], window=50
+        ).ema_indicator()
+        df_daily["Date"] = df_daily.index.date
+
+        # Calculate Intraday VWAP (Daily Reset)
+        df_15m["Date"] = df_15m.index.date
+        df_15m["Time"] = df_15m.index.time
+        df_15m["TypicalPrice"] = (
+            df_15m["High"] + df_15m["Low"] + df_15m["Close"]
+        ) / 3
+        df_15m["TP_Vol"] = df_15m["TypicalPrice"] * df_15m["Volume"]
+
+        df_15m["Cum_TP_Vol"] = df_15m.groupby("Date")["TP_Vol"].cumsum()
+        df_15m["Cum_Vol"] = df_15m.groupby("Date")["Volume"].cumsum()
+        df_15m["VWAP"] = df_15m["Cum_TP_Vol"] / df_15m["Cum_Vol"]
+
+        # Indicators: RSI & ATR
+        df_15m["RSI"] = ta.momentum.RSIIndicator(
+            df_15m["Close"], window=14
+        ).rsi()
+        df_15m["ATR"] = ta.volatility.AverageTrueRange(
+            df_15m["High"], df_15m["Low"], df_15m["Close"], window=14
+        ).average_true_range()
+
+        # Dynamic Envelopes
+        df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.0)
+        df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.0)
+
+        # Map Daily EMA to 15m Candles
+        daily_ema_map = df_daily.set_index("Date")["Daily_EMA50"].to_dict()
+        df_15m["Daily_EMA50"] = df_15m["Date"].map(daily_ema_map)
+        df_15m["Daily_EMA50"] = df_15m["Daily_EMA50"].ffill()
+
+        return df_15m.dropna()
+
+    except Exception as e:
+        print(f"Data Fetch Exception: {e}")
         return pd.DataFrame()
 
-    if isinstance(df_15m.columns, pd.MultiIndex):
-        df_15m.columns = df_15m.columns.get_level_values(0)
-
-    df_15m.dropna(inplace=True)
-
-    # Fetch Daily Data for Higher Timeframe (HTF) 50 EMA Filter
-    df_daily = yf.download(ticker, interval="1d", period="1y", progress=False)
-    if isinstance(df_daily.columns, pd.MultiIndex):
-        df_daily.columns = df_daily.columns.get_level_values(0)
-
-    df_daily["Daily_EMA50"] = ta.trend.EMAIndicator(
-        df_daily["Close"], window=50
-    ).ema_indicator()
-    df_daily["Date"] = df_daily.index.date
-
-    # Process 15m Indicators & Daily Resetted VWAP
-    df_15m["Date"] = df_15m.index.date
-    df_15m["Time"] = df_15m.index.time
-    df_15m["TypicalPrice"] = (
-        df_15m["High"] + df_15m["Low"] + df_15m["Close"]
-    ) / 3
-    df_15m["TP_Vol"] = df_15m["TypicalPrice"] * df_15m["Volume"]
-
-    df_15m["Cum_TP_Vol"] = df_15m.groupby("Date")["TP_Vol"].cumsum()
-    df_15m["Cum_Vol"] = df_15m.groupby("Date")["Volume"].cumsum()
-    df_15m["VWAP"] = df_15m["Cum_TP_Vol"] / df_15m["Cum_Vol"]
-
-    # RSI & ATR Indicators
-    df_15m["RSI"] = ta.momentum.RSIIndicator(
-        df_15m["Close"], window=14
-    ).rsi()
-    df_15m["ATR"] = ta.volatility.AverageTrueRange(
-        df_15m["High"], df_15m["Low"], df_15m["Close"], window=14
-    ).average_true_range()
-
-    # Dynamic VWAP Volatility Envelopes
-    df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.0)
-    df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.0)
-
-    # Map Daily 50 EMA back to 15m Candles
-    daily_ema_map = df_daily.set_index("Date")["Daily_EMA50"].to_dict()
-    df_15m["Daily_EMA50"] = df_15m["Date"].map(daily_ema_map)
-    df_15m["Daily_EMA50"] = df_15m["Daily_EMA50"].ffill()
-
-    return df_15m.dropna()
 
 
 def run_institutional_backtest(
