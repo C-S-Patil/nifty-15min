@@ -9,9 +9,9 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("⚡ Nifty 15-Min Quant Strategy Engine")
+st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
 
-# Sidebar Controls
+# 1. Sidebar Config
 st.sidebar.header("⚙️ Strategy & Execution")
 symbol_map = {"Nifty 50": "^NSEI", "Bank Nifty": "^NSEBANK"}
 selected_symbol = st.sidebar.selectbox("Select Asset", list(symbol_map.keys()))
@@ -26,20 +26,18 @@ rsi_overbought = st.sidebar.slider("RSI Overbought", 55, 75, 62)
 sl_atr_mult = st.sidebar.slider("SL ATR Multiplier", 0.5, 3.0, 1.5)
 tgt_atr_mult = st.sidebar.slider("TGT ATR Multiplier", 1.5, 5.0, 2.5)
 
-# Fetch Data with 1 Month Window to ensure sufficient 15m bars
-try:
+# 2. Fetch Data with UI Logging
+st.subheader("🛠️ Execution Diagnostics")
+with st.expander("Show Execution Logs", expanded=True):
     data = fetch_and_prepare_data(ticker=ticker, period="1mo")
-except Exception as err:
-    st.error(f"❌ Data Fetch Error: {err}")
-    st.stop()
 
 if data.empty:
-    st.warning(
-        f"⚠️ No market data returned for {selected_symbol}. Please check internet connection or retry shortly."
+    st.error(
+        f"❌ Data pipeline returned an empty DataFrame for {selected_symbol}. Check logs above."
     )
     st.stop()
 
-# Get Current IST Time
+# 3. Main Dashboard
 ist = pytz.timezone("Asia/Kolkata")
 latest = data.iloc[-1]
 last_time_ist = latest.name.strftime("%Y-%m-%d %H:%M IST")
@@ -57,7 +55,7 @@ c4.metric("Daily Trend", trend_state)
 
 st.line_chart(data[["Close", "VWAP", "VWAP_Upper", "VWAP_Lower"]].tail(100))
 
-# Backtest Performance
+# 4. Backtest Analytics
 trades_df = run_institutional_backtest(
     data,
     rsi_oversold=rsi_oversold,
