@@ -176,10 +176,10 @@ if not trades_1m.empty:
 else:
     st.info("No trades triggered during the last 1-month period.")
 
-# 12-MONTH LONG-TERM PERFORMANCE DASHBOARD
 st.markdown("---")
-st.subheader("🗓️ 12-Month Extended Performance Analysis")
+st.subheader("🗓️ Last 12 Months Performance Breakdown")
 
+# Ensure 1-year data is processed for trades
 trades_12m = run_institutional_backtest(
     data,
     rsi_oversold=rsi_oversold,
@@ -187,36 +187,52 @@ trades_12m = run_institutional_backtest(
     num_lots=num_lots,
 )
 
-summary_12m = generate_12m_performance_summary(trades_12m, capital)
+if not trades_12m.empty:
+    monthly_table = generate_monthly_breakdown(trades_12m, capital)
 
-if not summary_12m.empty:
-    st.dataframe(summary_12m, use_container_width=True)
+    # Display 12-Row Monthly Summary Table
+    st.dataframe(
+        monthly_table,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Month": st.column_config.TextColumn("Month"),
+            "Actual Profit %": st.column_config.TextColumn(
+                "Actual Profit %",
+                help="Net Return percentage calculated on capital input",
+            ),
+        },
+    )
 
-    # Cumulative Equity Curve Plot
-    if "ExitTime" in trades_12m.columns and not trades_12m.empty:
-        trades_12m["ExitDate"] = pd.to_datetime(
-            trades_12m["ExitTime"]
-        ).dt.date
-        daily_equity = trades_12m.groupby("ExitDate")["NetPnL"].sum().cumsum()
+    # Monthly Net PnL Bar Chart
+    trades_12m["YearMonth"] = pd.to_datetime(trades_12m["ExitTime"]).dt.strftime(
+        "%b %Y"
+    )
+    monthly_pnl_series = trades_12m.groupby("YearMonth", sort=False)[
+        "NetPnL"
+    ].sum()
 
-        fig_eq = go.Figure()
-        fig_eq.add_trace(
-            go.Scatter(
-                x=daily_equity.index,
-                y=daily_equity.values,
-                mode="lines+markers",
-                name="Cumulative PnL",
-                line=dict(color="#2ecc71", width=2),
+    colors = [
+        "#2ecc71" if val >= 0 else "#e74c3c" for val in monthly_pnl_series.values
+    ]
+
+    fig_bar = go.Figure(
+        data=[
+            go.Bar(
+                x=monthly_pnl_series.index,
+                y=monthly_pnl_series.values,
+                marker_color=colors,
             )
-        )
-        fig_eq.update_layout(
-            title="12-Month Cumulative Equity Growth Curve (₹)",
-            xaxis_title="Date",
-            yaxis_title="Net PnL (₹)",
-            template="plotly_dark",
-            height=350,
-        )
-        st.plotly_chart(fig_eq, use_container_width=True)
+        ]
+    )
+    fig_bar.update_layout(
+        title="Monthly Net Profit / Loss Breakdown (₹)",
+        xaxis_title="Month",
+        yaxis_title="Net PnL (₹)",
+        template="plotly_dark",
+        height=380,
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
 else:
     st.info("Insufficient historical data to generate 12-month summary.")
     
