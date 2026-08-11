@@ -27,7 +27,7 @@ def fetch_and_prepare_data(
             df_15m = yf.download(
                 ticker,
                 interval=interval,
-                period="1 mo",
+                period="1mo",
                 progress=False,
                 session=session,
             )
