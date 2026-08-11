@@ -256,40 +256,56 @@ def run_institutional_backtest(
     return pd.DataFrame(trades)
 
 
-def generate_12m_performance_summary(
+def generate_monthly_breakdown(
     trades_df: pd.DataFrame, capital: float
 ) -> pd.DataFrame:
-    """Generates comprehensive 12-Month Performance Analytics Summary."""
+    """Groups historical trades by Year-Month to generate a 12-row monthly performance table."""
     if trades_df.empty:
         return pd.DataFrame()
 
-    total_trades = len(trades_df)
-    profitable_trades = len(trades_df[trades_df["NetPnL"] > 0])
-    loss_trades = len(trades_df[trades_df["NetPnL"] <= 0])
-    win_rate = (
-        (profitable_trades / total_trades) * 100 if total_trades > 0 else 0.0
+    trades_df = trades_df.copy()
+    trades_df["YearMonth"] = pd.to_datetime(trades_df["ExitTime"]).dt.to_period(
+        "M"
     )
 
-    highest_profit = trades_df["NetPnL"].max()
-    highest_loss = trades_df["NetPnL"].min()
+    monthly_records = []
 
-    total_gross_pnl = trades_df["GrossPnL"].sum()
-    total_charges = trades_df["Charges"].sum()
-    total_net_pnl = trades_df["NetPnL"].sum()
+    # Get unique last 12 months in reverse chronological order
+    all_months = pd.period_range(
+        end=pd.Timestamp.now().to_period("M"), periods=12, freq="M"
+    )
 
-    roi_pct = (total_net_pnl / capital) * 100
+    for ym in reversed(all_months):
+        m_trades = trades_df[trades_df["YearMonth"] == ym]
 
-    summary = {
-        "Total Trades": [total_trades],
-        "Profitable Trades 🟢": [profitable_trades],
-        "Loss Trades 🔴": [loss_trades],
-        "Win Rate %": [f"{win_rate:.1f}%"],
-        "Highest Profit": [f"₹{highest_profit:,.2f}"],
-        "Highest Loss": [f"₹{highest_loss:,.2f}"],
-        "Total Charges": [f"₹{total_charges:,.2f}"],
-        "Gross PnL": [f"₹{total_gross_pnl:,.2f}"],
-        "Net PnL": [f"₹{total_net_pnl:,.2f}"],
-        "ROI % on Capital": [f"{roi_pct:+.2f}%"],
-    }
+        month_label = ym.strftime("%b %Y")
+        total_trades = len(m_trades)
 
-    return pd.DataFrame(summary)
+        if total_trades > 0:
+            gross_pnl = m_trades["GrossPnL"].sum()
+            charges = m_trades["Charges"].sum()
+            net_pnl = m_trades["NetPnL"].sum()
+            profit_pct = (net_pnl / capital) * 100
+            win_trades = len(m_trades[m_trades["NetPnL"] > 0])
+            win_rate = (win_trades / total_trades) * 100
+        else:
+            gross_pnl = 0.0
+            charges = 0.0
+            net_pnl = 0.0
+            profit_pct = 0.0
+            win_rate = 0.0
+
+        monthly_records.append(
+            {
+                "Month": month_label,
+                "Total Trades": total_trades,
+                "Win Rate %": f"{win_rate:.1f}%",
+                "Gross PnL (₹)": f"₹{gross_pnl:,.2f}",
+                "Charges (₹)": f"₹{charges:,.2f}",
+                "Net PnL (₹)": f"₹{net_pnl:,.2f}",
+                "Actual Profit %": f"{profit_pct:+.2f}%",
+            }
+        )
+
+    return pd.DataFrame(monthly_records)
+    
