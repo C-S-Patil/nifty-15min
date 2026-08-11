@@ -28,7 +28,7 @@ tgt_atr_mult = st.sidebar.slider("TGT ATR Multiplier", 1.5, 5.0, 2.5)
 
 # Fetch Data with 1 Month Window to ensure sufficient 15m bars
 try:
-    data = fetch_and_prepare_data(ticker=ticker, period="1 mo")
+    data = fetch_and_prepare_data(ticker=ticker, period="1mo")
 except Exception as err:
     st.error(f"❌ Data Fetch Error: {err}")
     st.stop()
