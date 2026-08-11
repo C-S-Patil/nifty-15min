@@ -17,10 +17,10 @@ KITE_ACCESS_TOKEN = st.secrets.get(
 
 
 def send_telegram_alert(message: str) -> bool:
-    """Sends Markdown alerts to Telegram. Logs to UI if credentials missing."""
+    """Sends Markdown alerts to Telegram. Logs to UI if credentials are missing."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         st.warning(
-            "⚠️ [LOG] Telegram Bot Token or Chat ID not configured in secrets. Skipping Telegram alert."
+            "⚠️ [LOG] Telegram Bot Token or Chat ID not configured in Streamlit secrets. Skipping Telegram alert."
         )
         print("Telegram credentials missing.")
         return False
