@@ -1,25 +1,129 @@
-import datetime
+from datetime import time
+import os
 import pandas as pd
 import plotly.graph_objects as go
 import pytz
+import requests
 import streamlit as st
-from execution_engine import execute_auto_trade
 from strategy_engine import (
     fetch_and_prepare_data,
     generate_monthly_breakdown,
     run_institutional_backtest,
 )
 
-# Page Configuration
+# Optional import for KiteConnect with fallback handling
+try:
+    from kiteconnect import KiteConnect
+
+    KITE_AVAILABLE = True
+except ImportError:
+    KITE_AVAILABLE = False
+
+
+# ------------------------------------------------------------------
+# EXECUTION ENGINE FUNCTIONS
+# ------------------------------------------------------------------
+def send_telegram_alert(message: str) -> bool:
+    bot_token = st.secrets.get(
+        "TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", "")
+    )
+    chat_id = st.secrets.get(
+        "TELEGRAM_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "")
+    )
+
+    if not bot_token or not chat_id:
+        st.warning(
+            "⚠️ [LOG] Telegram Bot Token or Chat ID not configured in Streamlit Secrets."
+        )
+        return False
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        res = requests.post(
+            url,
+            data={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "Markdown",
+            },
+            timeout=5,
+        )
+        if res.status_code == 200:
+            st.info("📨 [LOG] Telegram alert sent successfully.")
+            return True
+        else:
+            st.error(f"❌ [LOG] Telegram Error: {res.status_code} - {res.text}")
+            return False
+    except Exception as e:
+        st.error(f"❌ [LOG] Telegram Exception: {e}")
+        return False
+
+
+def execute_auto_trade(
+    symbol: str, action: str, price: float, num_lots: int, reason: str = ""
+):
+    total_qty = num_lots * 75
+
+    # 1. Dispatch Telegram Alert
+    alert_msg = (
+        f"🚨 *NIFTY {action} SIGNAL DETECTED* ⚡\n\n"
+        f"📌 *Asset:* {symbol}\n"
+        f"📈 *Signal Price:* ₹{price:.2f}\n"
+        f"📦 *Quantity:* {total_qty} ({num_lots} Lots)\n"
+        f"💡 *Trigger Reason:* {reason}"
+    )
+    send_telegram_alert(alert_msg)
+
+    # 2. Kite Live Order Execution (with Paper Fallback)
+    api_key = st.secrets.get("KITE_API_KEY", os.getenv("KITE_API_KEY", ""))
+    access_token = st.secrets.get(
+        "KITE_ACCESS_TOKEN", os.getenv("KITE_ACCESS_TOKEN", "")
+    )
+
+    if KITE_AVAILABLE and api_key and access_token:
+        try:
+            kite = KiteConnect(api_key=api_key)
+            kite.set_access_token(access_token)
+
+            tx_type = (
+                kite.TRANSACTION_TYPE_BUY
+                if action == "BUY"
+                else kite.TRANSACTION_TYPE_SELL
+            )
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=kite.EXCHANGE_NFO,
+                tradingsymbol="NIFTY24AUGFUT",
+                transaction_type=tx_type,
+                quantity=total_qty,
+                product=kite.PRODUCT_MIS,
+                order_type=kite.ORDER_TYPE_MARKET,
+            )
+            st.success(f"🚀 Live Kite Order Placed! Order ID: `{order_id}`")
+            send_telegram_alert(
+                f"🚀 *LIVE ORDER EXECUTED*\nOrder ID: `{order_id}` | Qty: {total_qty}"
+            )
+            return {"status": "LIVE_SUCCESS", "order_id": order_id}
+        except Exception as e:
+            st.error(f"❌ Kite Order Error: {e}")
+            return {"status": "FAILED", "reason": str(e)}
+    else:
+        st.warning(
+            "ℹ️ [LOG] Zerodha Kite credentials or package missing. Execution logged in Paper Mode."
+        )
+        return {"status": "PAPER_LOGGED"}
+
+
+# ------------------------------------------------------------------
+# STREAMLIT UI DASHBOARD
+# ------------------------------------------------------------------
 st.set_page_config(
-    page_title="Nifty Institutional Quant Engine",
-    page_icon="⚡",
-    layout="wide",
+    page_title="Nifty Quant Strategy Engine", page_icon="⚡", layout="wide"
 )
 
-st.title("⚡ Nifty 15-Min Quant Strategy Engine")
+st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
 
-# Sidebar Sizing Controls
+# Sidebar Controls
 st.sidebar.header("💰 Capital & Order Sizing")
 capital = st.sidebar.number_input(
     "Trading Capital (₹)", value=250000.0, step=25000.0, format="%.2f"
@@ -37,16 +141,16 @@ ticker = symbol_map[selected_symbol]
 rsi_oversold = st.sidebar.slider("RSI Oversold Filter", 25, 45, 38)
 rsi_overbought = st.sidebar.slider("RSI Overbought Filter", 55, 75, 62)
 
-# Load Historical Market Data
+# Load Historical Data
 data = fetch_and_prepare_data(ticker=ticker, period="1y")
 
 if data.empty:
-    st.error(f"❌ Failed to load market data for {selected_symbol}.")
+    st.error(f"❌ Failed to fetch market data for {selected_symbol}.")
     st.stop()
 
 one_month_data = data.tail(22 * 25)
 
-# SECTION 1: OPEN TRADES & LIVE MARKET MONITOR (FIRST)
+# SECTION 1: OPEN TRADES & LIVE CHART (FIRST)
 st.subheader("📌 Active Position & Market Monitor")
 
 ist = pytz.timezone("Asia/Kolkata")
@@ -69,7 +173,6 @@ if latest["Close"] < latest["VWAP_Lower"] and latest["RSI"] < rsi_oversold:
 elif latest["Close"] > latest["VWAP_Upper"] and latest["RSI"] > rsi_overbought:
     latest_signal = "SELL"
 
-# Signal & Auto-Execution Handler
 if latest_signal == "BUY":
     st.success(
         f"🟢 **BUY SIGNAL ACTIVE** at ₹{latest['Close']:.2f} | VWAP Lower: ₹{latest['VWAP_Lower']:.2f}"
@@ -93,7 +196,7 @@ elif latest_signal == "SELL":
             "SELL",
             latest["Close"],
             num_lots,
-            "RSI Overbought + VWAP Rally",
+            "RSI Overbought + VWAP Spike",
         )
 
 else:
@@ -101,7 +204,7 @@ else:
         "⚪ **No active entry signals on the current candle.** Strategy Status: HOLD"
     )
 
-# Active Hours Plotly Chart
+# Active Hours Chart
 recent_chart = data.tail(120)
 min_y = float(recent_chart["Low"].min()) - 10.0
 max_y = float(recent_chart["High"].max()) + 10.0
