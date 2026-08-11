@@ -8,7 +8,7 @@ import yfinance as yf
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", interval: str = "15m", period: str = "1 mo"
+    ticker: str = "^NSEI", interval: str = "15m", period: str = "1mo"
 ) -> pd.DataFrame:
     """Fetches intraday data and converts timestamps strictly to Asia/Kolkata (IST)."""
     try:
