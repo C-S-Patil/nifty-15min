@@ -14,17 +14,6 @@ st.set_page_config(
     page_title="Nifty Quant Strategy Engine", page_icon="⚡", layout="wide"
 )
 
-# Custom CSS for UI styling
-st.markdown(
-    """
-<style>
-    .buy-tag { background-color: #1e4620; color: #2ecc71; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
-    .sell-tag { background-color: #4a1515; color: #e74c3c; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
 st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
 
 # Sidebar Controls
@@ -161,7 +150,6 @@ if not trades_1m.empty:
         lambda x: "🟢 BUY" if x == "BUY" else "🔴 SELL"
     )
 
-    # Render Table with Short Column Header and Hover Tooltip ℹ️
     st.dataframe(
         display_df,
         use_container_width=True,
@@ -176,10 +164,10 @@ if not trades_1m.empty:
 else:
     st.info("No trades triggered during the last 1-month period.")
 
+# 12-MONTH MONTHLY BREAKDOWN
 st.markdown("---")
 st.subheader("🗓️ Last 12 Months Performance Breakdown")
 
-# Ensure 1-year data is processed for trades
 trades_12m = run_institutional_backtest(
     data,
     rsi_oversold=rsi_oversold,
@@ -190,30 +178,28 @@ trades_12m = run_institutional_backtest(
 if not trades_12m.empty:
     monthly_table = generate_monthly_breakdown(trades_12m, capital)
 
-    # Display 12-Row Monthly Summary Table
     st.dataframe(
         monthly_table,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Month": st.column_config.TextColumn("Month"),
             "Actual Profit %": st.column_config.TextColumn(
                 "Actual Profit %",
                 help="Net Return percentage calculated on capital input",
-            ),
+            )
         },
     )
 
-    # Monthly Net PnL Bar Chart
-    trades_12m["YearMonth"] = pd.to_datetime(trades_12m["ExitTime"]).dt.strftime(
-        "%b %Y"
-    )
+    trades_12m["YearMonth"] = pd.to_datetime(
+        trades_12m["ExitTime"]
+    ).dt.strftime("%b %Y")
     monthly_pnl_series = trades_12m.groupby("YearMonth", sort=False)[
         "NetPnL"
     ].sum()
 
     colors = [
-        "#2ecc71" if val >= 0 else "#e74c3c" for val in monthly_pnl_series.values
+        "#2ecc71" if val >= 0 else "#e74c3c"
+        for val in monthly_pnl_series.values
     ]
 
     fig_bar = go.Figure(
