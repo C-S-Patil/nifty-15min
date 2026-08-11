@@ -1,55 +1,75 @@
-import datetime
+from datetime import datetime
 import os
 import pytz
 import requests
-from strategy_engine import fetch_and_prepare_data
 
-TELEGRAM_BOT_TOKEN = "8209156550:AAEmxEg-bWapX_7kk4bdwXk0lj-1meISdJA"
-TELEGRAM_CHAT_ID = 951733992
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 
-def send_telegram_message(message):
+def send_telegram_alert(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram secrets missing.")
-        return
+        print("⚠️ Telegram credentials not configured. Skipping ping.")
+        return False
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        response = requests.post(
-            url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=5
+        res = requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown",
+            },
+            timeout=5,
         )
-        print("Telegram response:", response.status_code)
+        return res.status_code == 200
     except Exception as e:
-        print(f"Failed to send health check: {e}")
+        print(f"❌ Telegram send error: {e}")
+        return False
 
 
-def check_app_health():
-    # Set Indian Standard Time (IST)
+def run_health_check():
+    # Convert UTC time to IST
     ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.datetime.now(ist)
+    now_ist = datetime.now(ist)
 
-    current_time = now.strftime("%H:%M:%S")
-    current_date = now.strftime("%Y-%m-%d")
+    # 1. Skip Weekends (5 = Saturday, 6 = Sunday)
+    if now_ist.weekday() >= 5:
+        print(
+            f"ℹ️ Today is {now_ist.strftime('%A')} (Market Closed). Skipping health check."
+        )
+        return
 
-    # Perform a live connectivity & data health test
-    try:
-        df = fetch_and_prepare_data(ticker="^NSEI", period="5d")
-        if not df.empty:
-            app_status = "ONLINE 🟢 (Data Feed Healthy)"
-        else:
-            app_status = "WARNING 🟡 (Data Empty)"
-    except Exception as e:
-        app_status = f"ERROR 🔴 (Fetch Failed: {str(e)[:30]})"
+    current_time_str = now_ist.strftime("%H:%M")
+    current_hour = now_ist.hour
+    current_minute = now_ist.minute
 
-    # Construct status message
-    msg = (
-        f"🤖 *App Health Status*\n"
-        f"📅 Date: {current_date}\n"
-        f"⏰ Time: {current_time} IST\n"
-        f"⚡ AppStatus: {app_status}"
-    )
+    # 2. Check if current IST time matches 09:00 AM or 12:30 PM (with a 15-min cron window tolerance)
+    is_9am_slot = (current_hour == 9) and (0 <= current_minute < 15)
+    is_1230pm_slot = (current_hour == 12) and (30 <= current_minute < 45)
 
-    send_telegram_message(msg)
+    if is_9am_slot or is_1230pm_slot:
+        slot_label = (
+            "09:00 AM IST (Pre-Market Check)"
+            if is_9am_slot
+            else "12:30 PM IST (Mid-Day Check)"
+        )
+
+        message = (
+            f"🟢 *QUANT ENGINE HEALTH CHECK*\n\n"
+            f"📅 *Date:* {now_ist.strftime('%Y-%m-%d')}\n"
+            f"⏰ *Slot:* {slot_label}\n"
+            f"📡 *Status:* System active & ready for signals."
+        )
+        send_telegram_alert(message)
+        print(f"✅ Sent Telegram health check for {slot_label}")
+    else:
+        print(
+            f"ℹ️ Current time {current_time_str} IST is outside scheduled health check slots (09:00 AM & 12:30 PM). Skipping."
+        )
 
 
 if __name__ == "__main__":
-    check_app_health()
+    run_health_check()
+    
