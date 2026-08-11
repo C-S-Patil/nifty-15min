@@ -17,10 +17,10 @@ KITE_ACCESS_TOKEN = st.secrets.get(
 
 
 def send_telegram_alert(message: str) -> bool:
-    """Sends Markdown alerts to Telegram. Logs to console/UI if credentials missing."""
+    """Sends Markdown alerts to Telegram. Logs to UI if credentials missing."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         st.warning(
-            "⚠️ [LOG] Telegram Bot Token or Chat ID not configured. Skipping Telegram alert."
+            "⚠️ [LOG] Telegram Bot Token or Chat ID not configured in secrets. Skipping Telegram alert."
         )
         print("Telegram credentials missing.")
         return False
@@ -52,9 +52,9 @@ def send_telegram_alert(message: str) -> bool:
 def execute_auto_trade(
     symbol: str, action: str, price: float, num_lots: int, reason: str = ""
 ):
-    """Unified Order Execution Pipeline: Always dispatches Telegram alert and attempts Kite Live Order.
+    """Unified Order Execution Pipeline: Dispatches Telegram alert and attempts Kite Live Order.
 
-    Falls back to Paper Trading log if Kite secrets are unconfigured.
+    Defaults to Paper Trade Log if Kite secrets are unconfigured.
     """
     total_qty = num_lots * 75
 
@@ -97,15 +97,14 @@ def execute_auto_trade(
             return {"status": "LIVE_SUCCESS", "order_id": order_id}
 
         except Exception as e:
-            err_msg = f"❌ *Kite Order Failed*: {str(e)} | Executed in Paper Mode."
+            err_msg = f"❌ *Kite Order Failed*: {str(e)} | Logged in Paper Mode."
             send_telegram_alert(err_msg)
             st.error(f"❌ Kite Order Error: {e}")
             return {"status": "PAPER_FALLBACK", "reason": str(e)}
 
     else:
-        # Fallback to Paper Trade Log if Kite Credentials are missing
         st.warning(
-            "ℹ️ [LOG] Zerodha Kite credentials not found in secrets. Defaulting order to Paper Trade Log."
+            "ℹ️ [LOG] Zerodha Kite credentials not found in Streamlit Secrets. Defaulting execution to Paper Trade Log."
         )
         return {
             "status": "PAPER_LOGGED",
