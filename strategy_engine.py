@@ -1,17 +1,17 @@
 
 import numpy as np
 import pandas as pd
+import pytz
 import requests
 import ta
 import yfinance as yf
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", interval: str = "15m", period: str = "5d"
+    ticker: str = "^NSEI", interval: str = "15m", period: str = "1 mo"
 ) -> pd.DataFrame:
-    """Fetches intraday data using Ticker object and custom headers to bypass cloud IP blocks."""
+    """Fetches intraday data and converts timestamps strictly to Asia/Kolkata (IST)."""
     try:
-        # Create a custom session to bypass Yahoo's bot filter on AWS/Streamlit Cloud
         session = requests.Session()
         session.headers.update(
             {
@@ -19,32 +19,36 @@ def fetch_and_prepare_data(
             }
         )
 
-        # Download Intraday 15-min Data using Ticker history
+        # 1. Fetch 15m Intraday Data
         dat = yf.Ticker(ticker, session=session)
         df_15m = dat.history(interval=interval, period=period)
 
         if df_15m.empty:
-            # Fallback download call
             df_15m = yf.download(
                 ticker,
                 interval=interval,
-                period="5d",
+                period="1 mo",
                 progress=False,
                 session=session,
             )
 
         if df_15m.empty:
-            raise ValueError(
-                f"yfinance returned no data for ticker {ticker}. Cloud IP may be temporarily throttled."
-            )
+            return pd.DataFrame()
 
-        # Handle MultiIndex columns if present
+        # Handle MultiIndex columns
         if isinstance(df_15m.columns, pd.MultiIndex):
             df_15m.columns = df_15m.columns.get_level_values(0)
 
-        df_15m.dropna(inplace=True)
+        # 2. Timezone Normalization to IST (Asia/Kolkata)
+        ist = pytz.timezone("Asia/Kolkata")
+        if df_15m.index.tzinfo is None:
+            df_15m.index = df_15m.index.tz_localize("UTC").tz_convert(ist)
+        else:
+            df_15m.index = df_15m.index.tz_convert(ist)
 
-        # Download Daily Data for 50 EMA HTF Filter
+        df_15m.dropna(subset=["Close", "Volume"], inplace=True)
+
+        # 3. Fetch Daily Data for 50 EMA HTF Filter
         df_daily = dat.history(interval="1d", period="1y")
         if df_daily.empty:
             df_daily = yf.download(
@@ -58,12 +62,18 @@ def fetch_and_prepare_data(
         if isinstance(df_daily.columns, pd.MultiIndex):
             df_daily.columns = df_daily.columns.get_level_values(0)
 
+        if df_daily.index.tzinfo is None:
+            df_daily.index = df_daily.index.tz_localize("UTC").tz_convert(ist)
+        else:
+            df_daily.index = df_daily.index.tz_convert(ist)
+
+        # Calculate Daily 50 EMA
         df_daily["Daily_EMA50"] = ta.trend.EMAIndicator(
             df_daily["Close"], window=50
         ).ema_indicator()
         df_daily["Date"] = df_daily.index.date
 
-        # Calculate Intraday VWAP (Daily Reset)
+        # 4. Process Intraday Indicators & Daily Resetted VWAP
         df_15m["Date"] = df_15m.index.date
         df_15m["Time"] = df_15m.index.time
         df_15m["TypicalPrice"] = (
@@ -71,11 +81,12 @@ def fetch_and_prepare_data(
         ) / 3
         df_15m["TP_Vol"] = df_15m["TypicalPrice"] * df_15m["Volume"]
 
+        # Cumulative VWAP grouped by IST Date
         df_15m["Cum_TP_Vol"] = df_15m.groupby("Date")["TP_Vol"].cumsum()
         df_15m["Cum_Vol"] = df_15m.groupby("Date")["Volume"].cumsum()
         df_15m["VWAP"] = df_15m["Cum_TP_Vol"] / df_15m["Cum_Vol"]
 
-        # Indicators: RSI & ATR
+        # Technical Indicators
         df_15m["RSI"] = ta.momentum.RSIIndicator(
             df_15m["Close"], window=14
         ).rsi()
@@ -83,7 +94,6 @@ def fetch_and_prepare_data(
             df_15m["High"], df_15m["Low"], df_15m["Close"], window=14
         ).average_true_range()
 
-        # Dynamic VWAP Envelopes
         df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.0)
         df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.0)
 
@@ -95,10 +105,8 @@ def fetch_and_prepare_data(
         return df_15m.dropna()
 
     except Exception as e:
-        # Re-raise error to show diagnostic info on the UI
-        raise RuntimeError(f"Data Fetch Exception: {e}")
-        
-
+        print(f"Data Processing Error: {e}")
+        return pd.DataFrame()
 
 
 def run_institutional_backtest(
