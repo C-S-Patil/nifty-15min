@@ -141,7 +141,6 @@ def run_institutional_backtest(
     in_position = False
     pos_type = None
     entry_price = 0.0
-    initial_sl = 0.0
     trailing_sl = 0.0
     tgt_price = 0.0
     entry_time = None
@@ -150,13 +149,22 @@ def run_institutional_backtest(
     total_qty = num_lots * lot_size
     total_charges = charges_per_trade * num_lots
 
-    for i in range(1, len(df)):
+    # Add ADX Filter to Strategy Data
+    df["ADX"] = ta.trend.ADXIndicator(
+        df["High"], df["Low"], df["Close"], window=14
+    ).adx()
+
+    for i in range(2, len(df)):
         row = df.iloc[i]
+        prev_row = df.iloc[i - 1]
         current_date = row["Date"]
         current_time = row.name.time()
 
         trades_today = daily_trade_count.get(current_date, 0)
 
+        # -----------------------------------------------------------
+        # 1. POSITION MANAGEMENT & EXITS
+        # -----------------------------------------------------------
         if in_position:
             high, low, close = row["High"], row["Low"], row["Close"]
             current_atr = row["ATR"] if not np.isnan(row["ATR"]) else 15.0
@@ -165,12 +173,14 @@ def run_institutional_backtest(
             exit_price = 0.0
             exit_reason = ""
 
+            # Force EOD Intraday Exit at 15:15 IST
             if current_time >= time(15, 15):
                 exit_triggered = True
                 exit_price = close
                 exit_reason = "EOD Squareoff"
 
             elif pos_type == "BUY":
+                # Ratchet Trailing SL only after 1.5x ATR Profit Move
                 if high >= entry_price + (current_atr * 1.5):
                     new_sl = high - (current_atr * 1.5)
                     trailing_sl = max(trailing_sl, new_sl)
@@ -222,6 +232,9 @@ def run_institutional_backtest(
                 )
                 in_position = False
 
+        # -----------------------------------------------------------
+        # 2. ENTRY LOGIC WITH REVERSAL CONFIRMATION (REDUCES FALSE POSITIVES)
+        # -----------------------------------------------------------
         if (
             not in_position
             and current_time < time(14, 45)
@@ -229,28 +242,46 @@ def run_institutional_backtest(
             and row["ATR"] >= 10.0
         ):
             close = row["Close"]
+            adx = row["ADX"]
 
-            if close < row["VWAP_Lower"] and row["RSI"] < rsi_oversold:
+            # BUY ENTRY FILTER:
+            # 1. Price was below VWAP Lower on previous candle
+            # 2. Current candle is a GREEN reversal bar (Close > Open)
+            # 3. RSI < Oversold & ADX < 32 (Avoid trading strong downward trends)
+            if (
+                prev_row["Close"] < prev_row["VWAP_Lower"]
+                and close > row["Open"]
+                and row["RSI"] < rsi_oversold
+                and adx < 32
+            ):
                 in_position = True
                 pos_type = "BUY"
                 entry_price = close
                 entry_time = row.name
-                initial_sl = entry_price - (row["ATR"] * sl_atr_mult)
-                trailing_sl = initial_sl
+                trailing_sl = entry_price - (row["ATR"] * sl_atr_mult)
                 tgt_price = entry_price + (row["ATR"] * tgt_atr_mult)
                 daily_trade_count[current_date] = trades_today + 1
 
-            elif close > row["VWAP_Upper"] and row["RSI"] > rsi_overbought:
+            # SELL ENTRY FILTER:
+            # 1. Price was above VWAP Upper on previous candle
+            # 2. Current candle is a RED reversal bar (Close < Open)
+            # 3. RSI > Overbought & ADX < 32
+            elif (
+                prev_row["Close"] > prev_row["VWAP_Upper"]
+                and close < row["Open"]
+                and row["RSI"] > rsi_overbought
+                and adx < 32
+            ):
                 in_position = True
                 pos_type = "SELL"
                 entry_price = close
                 entry_time = row.name
-                initial_sl = entry_price + (row["ATR"] * sl_atr_mult)
-                trailing_sl = initial_sl
+                trailing_sl = entry_price + (row["ATR"] * sl_atr_mult)
                 tgt_price = entry_price - (row["ATR"] * tgt_atr_mult)
                 daily_trade_count[current_date] = trades_today + 1
 
     return pd.DataFrame(trades)
+    
 
 
 def generate_monthly_breakdown(
