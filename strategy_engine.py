@@ -1,8 +1,8 @@
-
 import numpy as np
 import pandas as pd
 import pytz
 import requests
+import streamlit as st
 import ta
 import yfinance as yf
 
@@ -10,7 +10,9 @@ import yfinance as yf
 def fetch_and_prepare_data(
     ticker: str = "^NSEI", interval: str = "15m", period: str = "1mo"
 ) -> pd.DataFrame:
-    """Fetches intraday data and converts timestamps strictly to Asia/Kolkata (IST)."""
+    """Fetches intraday data with step-by-step diagnostic logging."""
+    st.info(f"🔍 [LOG 1] Starting data fetch for Ticker: `{ticker}`")
+
     try:
         session = requests.Session()
         session.headers.update(
@@ -19,36 +21,48 @@ def fetch_and_prepare_data(
             }
         )
 
-        # 1. Fetch 15m Intraday Data
+        st.info("📡 [LOG 2] Querying Yahoo Finance Ticker history...")
         dat = yf.Ticker(ticker, session=session)
         df_15m = dat.history(interval=interval, period=period)
 
+        st.write(f"📊 [LOG 3] Ticker history returned rows: `{len(df_15m)}`")
+
         if df_15m.empty:
+            st.warning(
+                "⚠️ [LOG 4] `dat.history` returned empty. Trying fallback `yf.download`..."
+            )
             df_15m = yf.download(
                 ticker,
                 interval=interval,
-                period="1mo",
+                period="5d",
                 progress=False,
                 session=session,
             )
+            st.write(
+                f"📊 [LOG 4.1] Fallback download returned rows: `{len(df_15m)}`"
+            )
 
         if df_15m.empty:
+            st.error(
+                "❌ [LOG 5] Both `dat.history` and `yf.download` returned empty DataFrames."
+            )
             return pd.DataFrame()
 
         # Handle MultiIndex columns
         if isinstance(df_15m.columns, pd.MultiIndex):
             df_15m.columns = df_15m.columns.get_level_values(0)
 
-        # 2. Timezone Normalization to IST (Asia/Kolkata)
+        # Timezone Normalization to IST
         ist = pytz.timezone("Asia/Kolkata")
         if df_15m.index.tzinfo is None:
             df_15m.index = df_15m.index.tz_localize("UTC").tz_convert(ist)
         else:
             df_15m.index = df_15m.index.tz_convert(ist)
 
+        st.info(f"🕒 [LOG 6] Timezone converted to IST. Cleaning NAs...")
         df_15m.dropna(subset=["Close", "Volume"], inplace=True)
 
-        # 3. Fetch Daily Data for 50 EMA HTF Filter
+        st.info("📈 [LOG 7] Fetching Daily 50 EMA Higher Timeframe data...")
         df_daily = dat.history(interval="1d", period="1y")
         if df_daily.empty:
             df_daily = yf.download(
@@ -67,13 +81,13 @@ def fetch_and_prepare_data(
         else:
             df_daily.index = df_daily.index.tz_convert(ist)
 
-        # Calculate Daily 50 EMA
         df_daily["Daily_EMA50"] = ta.trend.EMAIndicator(
             df_daily["Close"], window=50
         ).ema_indicator()
         df_daily["Date"] = df_daily.index.date
 
-        # 4. Process Intraday Indicators & Daily Resetted VWAP
+        # Process Intraday VWAP & Indicators
+        st.info("🧮 [LOG 8] Calculating VWAP, RSI, and ATR...")
         df_15m["Date"] = df_15m.index.date
         df_15m["Time"] = df_15m.index.time
         df_15m["TypicalPrice"] = (
@@ -81,12 +95,10 @@ def fetch_and_prepare_data(
         ) / 3
         df_15m["TP_Vol"] = df_15m["TypicalPrice"] * df_15m["Volume"]
 
-        # Cumulative VWAP grouped by IST Date
         df_15m["Cum_TP_Vol"] = df_15m.groupby("Date")["TP_Vol"].cumsum()
         df_15m["Cum_Vol"] = df_15m.groupby("Date")["Volume"].cumsum()
         df_15m["VWAP"] = df_15m["Cum_TP_Vol"] / df_15m["Cum_Vol"]
 
-        # Technical Indicators
         df_15m["RSI"] = ta.momentum.RSIIndicator(
             df_15m["Close"], window=14
         ).rsi()
@@ -97,15 +109,20 @@ def fetch_and_prepare_data(
         df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.0)
         df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.0)
 
-        # Map Daily EMA to 15m Candles
         daily_ema_map = df_daily.set_index("Date")["Daily_EMA50"].to_dict()
         df_15m["Daily_EMA50"] = df_15m["Date"].map(daily_ema_map)
         df_15m["Daily_EMA50"] = df_15m["Daily_EMA50"].ffill()
 
+        st.success(
+            f"✅ [LOG 9] Data preparation completed successfully! Final Rows: `{len(df_15m)}`"
+        )
         return df_15m.dropna()
 
     except Exception as e:
-        print(f"Data Processing Error: {e}")
+        st.error(f"💥 [CRITICAL ERROR IN STRATEGY ENGINE]: {e}")
+        import traceback
+
+        st.code(traceback.format_exc())
         return pd.DataFrame()
 
 
@@ -121,7 +138,6 @@ def run_institutional_backtest(
     brokerage_per_order: float = 20.0,
     tax_rate: float = 0.0006,
 ) -> pd.DataFrame:
-    """Executes backtest with HTF Trend, Dynamic Envelopes, TSL, EOD Squareoff, and Fees."""
     trades = []
     in_position = False
     pos_type = None
@@ -142,7 +158,6 @@ def run_institutional_backtest(
             raw_exit_price = 0.0
             exit_reason = ""
 
-            # Force EOD Intraday Exit at 03:15 PM IST
             if current_time >= pd.to_datetime("15:15").time():
                 exit_triggered = True
                 raw_exit_price = close
@@ -241,3 +256,4 @@ def run_institutional_backtest(
                 tgt_price = entry_price - (row["ATR"] * tgt_mult)
 
     return pd.DataFrame(trades)
+    
