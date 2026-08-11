@@ -1,3 +1,4 @@
+import datetime
 import numpy as np
 import pandas as pd
 import pytz
@@ -6,10 +7,35 @@ import ta
 import yfinance as yf
 
 
+def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
+    """Filters data to retain only active exchange trading sessions (09:15 - 15:30 IST)
+
+    and special evening trading windows (e.g. Samvat / Muhurat Trading).
+    """
+    if df.empty:
+        return df
+
+    # Convert index times to time objects for fast filtering
+    times = df.index.time
+    standard_start = datetime.time(9, 15)
+    standard_end = datetime.time(15, 30)
+
+    # Special session window (e.g., Muhurat Trading usually 18:00 - 19:30 IST)
+    muhurat_start = datetime.time(18, 0)
+    muhurat_end = datetime.time(19, 30)
+
+    # Filter mask for Standard Market Hours OR Special Evening Session
+    standard_mask = (times >= standard_start) & (times <= standard_end)
+    muhurat_mask = (times >= muhurat_start) & (times <= muhurat_end)
+
+    active_df = df[standard_mask | muhurat_mask].copy()
+    return active_df
+
+
 def fetch_and_prepare_data(
     ticker: str = "^NSEI", interval: str = "15m", period: str = "1mo"
 ) -> pd.DataFrame:
-    """Fetches intraday data with volume fallback to ensure VWAP is calculated correctly for index tickers."""
+    """Fetches intraday data and strips non-trading hours."""
     try:
         session = requests.Session()
         session.headers.update(
@@ -36,7 +62,7 @@ def fetch_and_prepare_data(
         if isinstance(df_15m.columns, pd.MultiIndex):
             df_15m.columns = df_15m.columns.get_level_values(0)
 
-        # Timezone Normalization to IST
+        # 1. Timezone Normalization to IST
         ist = pytz.timezone("Asia/Kolkata")
         if df_15m.index.tzinfo is None:
             df_15m.index = df_15m.index.tz_localize("UTC").tz_convert(ist)
@@ -45,13 +71,19 @@ def fetch_and_prepare_data(
 
         df_15m.dropna(subset=["Close"], inplace=True)
 
-        # Fix missing Volume for ^NSEI by substituting Candle Range as Weighting
+        # 2. Filter Active Market Hours ONLY (09:15 to 15:30 IST + Samvat)
+        df_15m = filter_active_market_hours(df_15m)
+
+        if df_15m.empty:
+            return pd.DataFrame()
+
+        # Fix missing Volume for Index tickers
         if df_15m["Volume"].sum() == 0 or df_15m["Volume"].isna().all():
             df_15m["Volume"] = (df_15m["High"] - df_15m["Low"]).replace(
                 0, 0.01
             )
 
-        # Daily HTF Data
+        # 3. Daily HTF Data for 50 EMA Filter
         df_daily = dat.history(interval="1d", period="1y")
         if df_daily.empty:
             df_daily = yf.download(
@@ -75,7 +107,7 @@ def fetch_and_prepare_data(
         ).ema_indicator()
         df_daily["Date"] = df_daily.index.date
 
-        # Calculate Intraday Resetted VWAP
+        # 4. Calculate Intraday Resetted VWAP
         df_15m["Date"] = df_15m.index.date
         df_15m["Time"] = df_15m.index.time
         df_15m["TypicalPrice"] = (
