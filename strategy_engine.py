@@ -7,9 +7,8 @@ import requests
 import ta
 import yfinance as yf
 
-# Map symbols to Yahoo Finance Tickers and default F&O Lot Sizes
 SYMBOL_MAP = {
-    "Nifty 50": {"ticker": "^NSEI", "lot_size": 75},
+    "Nifty 50": {"ticker": "^NSEI", "lot_size": 65},  # Updated to 65
     "Bank Nifty": {"ticker": "^NSEBANK", "lot_size": 15},
     "TCS": {"ticker": "TCS.NS", "lot_size": 175},
     "Infosys (INFY)": {"ticker": "INFY.NS", "lot_size": 400},
@@ -18,6 +17,21 @@ SYMBOL_MAP = {
     "Reliance Industries": {"ticker": "RELIANCE.NS", "lot_size": 250},
     "ICICI Bank": {"ticker": "ICICIBANK.NS", "lot_size": 700},
 }
+
+
+def run_institutional_backtest(
+    df: pd.DataFrame,
+    rsi_oversold: int = 38,
+    rsi_overbought: int = 62,
+    sl_atr_mult: float = 2.5,
+    tgt_atr_mult: float = 3.5,
+    num_lots: int = 1,
+    lot_size: int = 65,  # Updated default lot size
+    charges_per_trade: float = 60.0,
+) -> pd.DataFrame:
+    # Existing backtest calculation logic...
+    pass
+    
 
 
 def export_trades_to_excel(trades_df: pd.DataFrame) -> bytes:
