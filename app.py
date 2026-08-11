@@ -5,7 +5,7 @@ import pytz
 import streamlit as st
 from strategy_engine import (
     fetch_and_prepare_data,
-    generate_12m_performance_summary,
+    generate_monthly_breakdown,
     run_institutional_backtest,
 )
 
