@@ -1,3 +1,4 @@
+
 import numpy as np
 import pandas as pd
 import requests
@@ -6,11 +7,11 @@ import yfinance as yf
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", interval: str = "15m", period: str = "10d"
+    ticker: str = "^NSEI", interval: str = "15m", period: str = "5d"
 ) -> pd.DataFrame:
-    """Fetches intraday and daily data with cloud request headers to avoid Yahoo Finance blocks."""
+    """Fetches intraday data using Ticker object and custom headers to bypass cloud IP blocks."""
     try:
-        # Create a custom session with user-agent to bypass Streamlit Cloud IP blocking
+        # Create a custom session to bypass Yahoo's bot filter on AWS/Streamlit Cloud
         session = requests.Session()
         session.headers.update(
             {
@@ -18,17 +19,12 @@ def fetch_and_prepare_data(
             }
         )
 
-        # Download Intraday 15-min Data
-        df_15m = yf.download(
-            ticker,
-            interval=interval,
-            period=period,
-            progress=False,
-            session=session,
-        )
+        # Download Intraday 15-min Data using Ticker history
+        dat = yf.Ticker(ticker, session=session)
+        df_15m = dat.history(interval=interval, period=period)
 
         if df_15m.empty:
-            # Fallback retry with period="5d" if "10d" yields empty
+            # Fallback download call
             df_15m = yf.download(
                 ticker,
                 interval=interval,
@@ -38,19 +34,27 @@ def fetch_and_prepare_data(
             )
 
         if df_15m.empty:
-            print("yfinance returned empty dataset.")
-            return pd.DataFrame()
+            raise ValueError(
+                f"yfinance returned no data for ticker {ticker}. Cloud IP may be temporarily throttled."
+            )
 
-        # Handle MultiIndex columns from recent yfinance versions
+        # Handle MultiIndex columns if present
         if isinstance(df_15m.columns, pd.MultiIndex):
             df_15m.columns = df_15m.columns.get_level_values(0)
 
         df_15m.dropna(inplace=True)
 
         # Download Daily Data for 50 EMA HTF Filter
-        df_daily = yf.download(
-            ticker, interval="1d", period="1y", progress=False, session=session
-        )
+        df_daily = dat.history(interval="1d", period="1y")
+        if df_daily.empty:
+            df_daily = yf.download(
+                ticker,
+                interval="1d",
+                period="1y",
+                progress=False,
+                session=session,
+            )
+
         if isinstance(df_daily.columns, pd.MultiIndex):
             df_daily.columns = df_daily.columns.get_level_values(0)
 
@@ -79,7 +83,7 @@ def fetch_and_prepare_data(
             df_15m["High"], df_15m["Low"], df_15m["Close"], window=14
         ).average_true_range()
 
-        # Dynamic Envelopes
+        # Dynamic VWAP Envelopes
         df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.0)
         df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.0)
 
@@ -91,8 +95,9 @@ def fetch_and_prepare_data(
         return df_15m.dropna()
 
     except Exception as e:
-        print(f"Data Fetch Exception: {e}")
-        return pd.DataFrame()
+        # Re-raise error to show diagnostic info on the UI
+        raise RuntimeError(f"Data Fetch Exception: {e}")
+        
 
 
 
