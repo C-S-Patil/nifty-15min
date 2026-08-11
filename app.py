@@ -3,37 +3,30 @@ import pandas as pd
 import plotly.graph_objects as go
 import pytz
 import streamlit as st
-from execution_engine import (
-    execute_live_kite_order,
-    execute_paper_order,
-    send_telegram_alert,
-)
+from execution_engine import execute_auto_trade
 from strategy_engine import (
     fetch_and_prepare_data,
     generate_monthly_breakdown,
     run_institutional_backtest,
 )
 
+# Page Configuration
 st.set_page_config(
-    page_title="Nifty Quant Strategy & Execution Engine",
+    page_title="Nifty Institutional Quant Engine",
     page_icon="⚡",
     layout="wide",
 )
 
-st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
+st.title("⚡ Nifty 15-Min Quant Strategy Engine")
 
-# Sidebar - Mode & Execution Config
-st.sidebar.header("🕹️ Execution Control")
-execution_mode = st.sidebar.radio(
-    "Select Mode", ["Dashboard Only 📊", "Paper Trading 📄", "Live Kite Execution 🚀"]
-)
-
-st.sidebar.markdown("---")
-st.sidebar.header("💰 Capital & Sizing")
+# Sidebar Sizing Controls
+st.sidebar.header("💰 Capital & Order Sizing")
 capital = st.sidebar.number_input(
     "Trading Capital (₹)", value=250000.0, step=25000.0, format="%.2f"
 )
-num_lots = st.sidebar.slider("Number of Lots", min_value=1, max_value=20, value=1)
+num_lots = st.sidebar.slider(
+    "Number of Lots", min_value=1, max_value=20, value=1
+)
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Strategy Parameters")
@@ -44,17 +37,17 @@ ticker = symbol_map[selected_symbol]
 rsi_oversold = st.sidebar.slider("RSI Oversold Filter", 25, 45, 38)
 rsi_overbought = st.sidebar.slider("RSI Overbought Filter", 55, 75, 62)
 
-# Load Market Data
+# Load Historical Market Data
 data = fetch_and_prepare_data(ticker=ticker, period="1y")
 
 if data.empty:
-    st.error(f"❌ Failed to fetch market data for {selected_symbol}.")
+    st.error(f"❌ Failed to load market data for {selected_symbol}.")
     st.stop()
 
 one_month_data = data.tail(22 * 25)
 
-# SECTION 1: OPEN TRADES & LIVE CHART (DISPLAYED FIRST)
-st.subheader("📌 Live Active Position & Market Monitor")
+# SECTION 1: OPEN TRADES & LIVE MARKET MONITOR (FIRST)
+st.subheader("📌 Active Position & Market Monitor")
 
 ist = pytz.timezone("Asia/Kolkata")
 latest = data.iloc[-1]
@@ -63,62 +56,52 @@ trend_state = (
     "BULLISH 🟢" if latest["Close"] > latest["Daily_EMA50"] else "BEARISH 🔴"
 )
 
-# Metric Bar
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Close Price", f"₹{latest['Close']:.2f}")
 c2.metric("VWAP", f"₹{latest['VWAP']:.2f}")
 c3.metric("RSI (14)", f"{latest['RSI']:.1f}")
 c4.metric("Daily Trend", trend_state)
 
-# Check Open Signal Condition on Latest Candle
-latest_signal = "NEUTRAL"
+# Signal Evaluation
+latest_signal = "HOLD"
 if latest["Close"] < latest["VWAP_Lower"] and latest["RSI"] < rsi_oversold:
     latest_signal = "BUY"
 elif latest["Close"] > latest["VWAP_Upper"] and latest["RSI"] > rsi_overbought:
     latest_signal = "SELL"
 
-# Open Trade Status Card
+# Signal & Auto-Execution Handler
 if latest_signal == "BUY":
     st.success(
-        f"🟢 **ACTIVE BUY SIGNAL DETECTED** at ₹{latest['Close']:.2f} | VWAP Lower: ₹{latest['VWAP_Lower']:.2f}"
+        f"🟢 **BUY SIGNAL ACTIVE** at ₹{latest['Close']:.2f} | VWAP Lower: ₹{latest['VWAP_Lower']:.2f}"
     )
-    if execution_mode == "Paper Trading 📄":
-        if st.button("Trigger Paper Buy Order"):
-            execute_paper_order(
-                selected_symbol,
-                "BUY",
-                latest["Close"],
-                num_lots,
-                "RSI Oversold + VWAP Dip",
-            )
-    elif execution_mode == "Live Kite Execution 🚀":
-        if st.button("Execute Live Kite Buy Order"):
-            execute_live_kite_order(
-                selected_symbol, "BUY", latest["Close"], num_lots
-            )
+    if st.button("Dispatch Auto-Trade (Telegram + Kite)"):
+        execute_auto_trade(
+            selected_symbol,
+            "BUY",
+            latest["Close"],
+            num_lots,
+            "RSI Oversold + VWAP Dip",
+        )
 
 elif latest_signal == "SELL":
     st.error(
-        f"🔴 **ACTIVE SELL SIGNAL DETECTED** at ₹{latest['Close']:.2f} | VWAP Upper: ₹{latest['VWAP_Upper']:.2f}"
+        f"🔴 **SELL SIGNAL ACTIVE** at ₹{latest['Close']:.2f} | VWAP Upper: ₹{latest['VWAP_Upper']:.2f}"
     )
-    if execution_mode == "Paper Trading 📄":
-        if st.button("Trigger Paper Sell Order"):
-            execute_paper_order(
-                selected_symbol,
-                "SELL",
-                latest["Close"],
-                num_lots,
-                "RSI Overbought + VWAP Spike",
-            )
-    elif execution_mode == "Live Kite Execution 🚀":
-        if st.button("Execute Live Kite Sell Order"):
-            execute_live_kite_order(
-                selected_symbol, "SELL", latest["Close"], num_lots
-            )
-else:
-    st.info("⚪ **No active entry signals on the current candle.** (Status: HOLD)")
+    if st.button("Dispatch Auto-Trade (Telegram + Kite)"):
+        execute_auto_trade(
+            selected_symbol,
+            "SELL",
+            latest["Close"],
+            num_lots,
+            "RSI Overbought + VWAP Rally",
+        )
 
-# Plotly Active Trading Hours Chart
+else:
+    st.info(
+        "⚪ **No active entry signals on the current candle.** Strategy Status: HOLD"
+    )
+
+# Active Hours Plotly Chart
 recent_chart = data.tail(120)
 min_y = float(recent_chart["Low"].min()) - 10.0
 max_y = float(recent_chart["High"].max()) + 10.0
@@ -168,7 +151,7 @@ fig.update_xaxes(
     ]
 )
 fig.update_layout(
-    title=f"{selected_symbol} Active Market Sessions (09:15 - 15:30 IST) — {last_time_ist}",
+    title=f"{selected_symbol} Active Trading Sessions (09:15 - 15:30 IST) — {last_time_ist}",
     yaxis=dict(range=[min_y, max_y], title="Price (₹)"),
     xaxis=dict(title="Time (IST)"),
     template="plotly_dark",
@@ -177,7 +160,7 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 
-# SECTION 2: 1-MONTH PERFORMANCE ANALYTICS (DISPLAYED SECOND)
+# SECTION 2: 1-MONTH PERFORMANCE ANALYTICS (SECOND)
 st.markdown("---")
 st.subheader("📊 1-Month Performance Analytics")
 
@@ -225,7 +208,7 @@ else:
     st.info("No trades triggered during the last 1-month period.")
 
 
-# SECTION 3: 12-MONTH MONTHLY BREAKDOWN (DISPLAYED THIRD)
+# SECTION 3: 12-MONTH MONTHLY BREAKDOWN (THIRD)
 st.markdown("---")
 st.subheader("🗓️ Last 12 Months Performance Breakdown")
 
