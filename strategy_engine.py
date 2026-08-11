@@ -9,7 +9,7 @@ import yfinance as yf
 def fetch_and_prepare_data(
     ticker: str = "^NSEI", interval: str = "15m", period: str = "1mo"
 ) -> pd.DataFrame:
-    """Fetches intraday data with proper NaN forward-fill to prevent data wipeout."""
+    """Fetches intraday data with volume fallback to ensure VWAP is calculated correctly for index tickers."""
     try:
         session = requests.Session()
         session.headers.update(
@@ -43,7 +43,13 @@ def fetch_and_prepare_data(
         else:
             df_15m.index = df_15m.index.tz_convert(ist)
 
-        df_15m.dropna(subset=["Close", "Volume"], inplace=True)
+        df_15m.dropna(subset=["Close"], inplace=True)
+
+        # Fix missing Volume for ^NSEI by substituting Candle Range as Weighting
+        if df_15m["Volume"].sum() == 0 or df_15m["Volume"].isna().all():
+            df_15m["Volume"] = (df_15m["High"] - df_15m["Low"]).replace(
+                0, 0.01
+            )
 
         # Daily HTF Data
         df_daily = dat.history(interval="1d", period="1y")
@@ -69,7 +75,7 @@ def fetch_and_prepare_data(
         ).ema_indicator()
         df_daily["Date"] = df_daily.index.date
 
-        # Calculate Intraday VWAP & Indicators
+        # Calculate Intraday Resetted VWAP
         df_15m["Date"] = df_15m.index.date
         df_15m["Time"] = df_15m.index.time
         df_15m["TypicalPrice"] = (
@@ -81,6 +87,7 @@ def fetch_and_prepare_data(
         df_15m["Cum_Vol"] = df_15m.groupby("Date")["Volume"].cumsum()
         df_15m["VWAP"] = df_15m["Cum_TP_Vol"] / df_15m["Cum_Vol"]
 
+        # Technical Indicators
         df_15m["RSI"] = ta.momentum.RSIIndicator(
             df_15m["Close"], window=14
         ).rsi()
@@ -94,7 +101,6 @@ def fetch_and_prepare_data(
         daily_ema_map = df_daily.set_index("Date")["Daily_EMA50"].to_dict()
         df_15m["Daily_EMA50"] = df_15m["Date"].map(daily_ema_map)
 
-        # Forward fill and backward fill missing indicator values instead of dropping rows
         df_15m.ffill(inplace=True)
         df_15m.bfill(inplace=True)
 
@@ -143,7 +149,7 @@ def run_institutional_backtest(
                 exit_reason = "EOD Squareoff"
 
             elif pos_type == "BUY":
-                new_sl = high - (current_atr * sl_mult)
+                new_sl = high - (current_atr * sl_atr_mult)
                 trailing_sl = max(trailing_sl, new_sl)
 
                 if low <= trailing_sl:
@@ -156,7 +162,7 @@ def run_institutional_backtest(
                     exit_reason = "Target Hit"
 
             elif pos_type == "SELL":
-                new_sl = low + (current_atr * sl_mult)
+                new_sl = low + (current_atr * sl_atr_mult)
                 trailing_sl = min(trailing_sl, new_sl)
 
                 if high >= trailing_sl:
@@ -219,8 +225,8 @@ def run_institutional_backtest(
                 pos_type = "BUY"
                 entry_price = close * (1 + slippage_pct)
                 entry_time = row.name
-                trailing_sl = entry_price - (row["ATR"] * sl_mult)
-                tgt_price = entry_price + (row["ATR"] * tgt_mult)
+                trailing_sl = entry_price - (row["ATR"] * sl_atr_mult)
+                tgt_price = entry_price + (row["ATR"] * tgt_atr_mult)
 
             elif (
                 close < daily_ema
@@ -231,8 +237,8 @@ def run_institutional_backtest(
                 pos_type = "SELL"
                 entry_price = close * (1 - slippage_pct)
                 entry_time = row.name
-                trailing_sl = entry_price + (row["ATR"] * sl_mult)
-                tgt_price = entry_price - (row["ATR"] * tgt_mult)
+                trailing_sl = entry_price + (row["ATR"] * sl_atr_mult)
+                tgt_price = entry_price - (row["ATR"] * tgt_atr_mult)
 
     return pd.DataFrame(trades)
     
