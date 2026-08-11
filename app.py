@@ -2,39 +2,61 @@ import datetime
 import plotly.graph_objects as go
 import pytz
 import streamlit as st
-from strategy_engine import fetch_and_prepare_data, run_institutional_backtest
+from strategy_engine import (
+    fetch_and_prepare_data,
+    generate_12m_performance_summary,
+    run_institutional_backtest,
+)
 
+# App Setup
 st.set_page_config(
-    page_title="Nifty Institutional Quant Engine",
-    page_icon="⚡",
-    layout="wide",
+    page_title="Nifty Quant Strategy Engine", page_icon="⚡", layout="wide"
+)
+
+# Custom CSS for Colored Badges
+st.markdown(
+    """
+<style>
+    .buy-tag { background-color: #1e4620; color: #2ecc71; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
+    .sell-tag { background-color: #4a1515; color: #e74c3c; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
+    .metric-card { background-color: #1e222d; padding: 15px; border-radius: 8px; border: 1px solid #2a2e39; }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
 
-# Sidebar Config
-st.sidebar.header("⚙️ Strategy & Execution")
+# Sidebar Capital & Position Controls
+st.sidebar.header("💰 Capital & Order Sizing")
+capital = st.sidebar.number_input(
+    "Trading Capital (₹)", value=250000.0, step=25000.0, format="%.2f"
+)
+num_lots = st.sidebar.slider("Number of Lots", min_value=1, max_value=20, value=1)
+
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Strategy Parameters")
 symbol_map = {"Nifty 50": "^NSEI", "Bank Nifty": "^NSEBANK"}
 selected_symbol = st.sidebar.selectbox("Select Asset", list(symbol_map.keys()))
 ticker = symbol_map[selected_symbol]
 
-rsi_oversold = st.sidebar.slider("RSI Oversold", 25, 45, 38)
-rsi_overbought = st.sidebar.slider("RSI Overbought", 55, 75, 62)
-sl_atr_mult = st.sidebar.slider("SL ATR Multiplier", 0.5, 3.0, 1.5)
-tgt_atr_mult = st.sidebar.slider("TGT ATR Multiplier", 1.5, 5.0, 2.5)
+rsi_oversold = st.sidebar.slider("RSI Oversold Filter", 25, 45, 38)
+rsi_overbought = st.sidebar.slider("RSI Overbought Filter", 55, 75, 62)
 
-# Fetch Data
-data = fetch_and_prepare_data(ticker=ticker, period="1mo")
+# Load 1-Year Historical Data
+data = fetch_and_prepare_data(ticker=ticker, period="1y")
 
 if data.empty:
-    st.error(f"❌ Data pipeline returned an empty DataFrame for {selected_symbol}.")
+    st.error(f"❌ Failed to fetch market data for {selected_symbol}.")
     st.stop()
 
-# Main Metrics
+# Filter Last 30 Days Data for 1-Month Analytics View
+one_month_data = data.tail(22 * 25)  # Approx 22 trading days of 15m candles
+
+# Live Status Banner
 ist = pytz.timezone("Asia/Kolkata")
 latest = data.iloc[-1]
 last_time_ist = latest.name.strftime("%Y-%m-%d %H:%M IST")
-
 trend_state = (
     "BULLISH 🟢" if latest["Close"] > latest["Daily_EMA50"] else "BEARISH 🔴"
 )
@@ -43,22 +65,19 @@ st.subheader(f"Current Market Status ({selected_symbol}) — {last_time_ist}")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Close Price", f"₹{latest['Close']:.2f}")
 c2.metric("VWAP", f"₹{latest['VWAP']:.2f}")
-c3.metric("RSI", f"{latest['RSI']:.1f}")
+c3.metric("RSI (14)", f"{latest['RSI']:.1f}")
 c4.metric("Daily Trend", trend_state)
 
-# Plotly Interactive Chart with Custom Y-Axis Bounds (+10 / -10)
-# In app.py under the chart section:
-
-recent_data = data.tail(120)  # ~5 trading days of 15m candles
-min_y = float(recent_data["Low"].min()) - 10.0
-max_y = float(recent_data["High"].max()) + 10.0
+# Plotly Active Trading Hours Chart
+recent_chart = data.tail(120)
+min_y = float(recent_chart["Low"].min()) - 10.0
+max_y = float(recent_chart["High"].max()) + 10.0
 
 fig = go.Figure()
-
 fig.add_trace(
     go.Scatter(
-        x=recent_data.index,
-        y=recent_data["Close"],
+        x=recent_chart.index,
+        y=recent_chart["Close"],
         mode="lines",
         name="Close",
         line=dict(color="#1f77b4", width=2),
@@ -66,8 +85,8 @@ fig.add_trace(
 )
 fig.add_trace(
     go.Scatter(
-        x=recent_data.index,
-        y=recent_data["VWAP"],
+        x=recent_chart.index,
+        y=recent_chart["VWAP"],
         mode="lines",
         name="VWAP",
         line=dict(color="#ff7f0e", width=1.5),
@@ -75,8 +94,8 @@ fig.add_trace(
 )
 fig.add_trace(
     go.Scatter(
-        x=recent_data.index,
-        y=recent_data["VWAP_Upper"],
+        x=recent_chart.index,
+        y=recent_chart["VWAP_Upper"],
         mode="lines",
         name="VWAP Upper",
         line=dict(color="#d62728", width=1, dash="dash"),
@@ -84,55 +103,113 @@ fig.add_trace(
 )
 fig.add_trace(
     go.Scatter(
-        x=recent_data.index,
-        y=recent_data["VWAP_Lower"],
+        x=recent_chart.index,
+        y=recent_chart["VWAP_Lower"],
         mode="lines",
         name="VWAP Lower",
         line=dict(color="#2ca02c", width=1, dash="dash"),
     )
 )
 
-# Configure Axis & Hide Overnight / Weekend Gaps
 fig.update_xaxes(
     rangebreaks=[
-        dict(bounds=["sat", "mon"]),  # Hide Weekends
-        dict(bounds=[15.5, 9.25], pattern="hour"),  # Hide Overnight 15:30 to 09:15
+        dict(bounds=["sat", "mon"]),
+        dict(bounds=[15.5, 9.25], pattern="hour"),
     ]
 )
-
 fig.update_layout(
-    title=f"{selected_symbol} Active Trading Sessions (09:15 - 15:30 IST)",
+    title=f"{selected_symbol} Active Market Sessions (09:15 - 15:30 IST)",
     yaxis=dict(range=[min_y, max_y], title="Price (₹)"),
     xaxis=dict(title="Time (IST)"),
-    margin=dict(l=20, r=20, t=40, b=20),
     template="plotly_dark",
-    height=500,
+    height=450,
 )
-
 st.plotly_chart(fig, use_container_width=True)
 
-# Backtest Performance
-trades_df = run_institutional_backtest(
-    data,
+# 1-MONTH PERFORMANCE ANALYTICS
+trades_1m = run_institutional_backtest(
+    one_month_data,
     rsi_oversold=rsi_oversold,
     rsi_overbought=rsi_overbought,
-    sl_atr_mult=sl_atr_mult,
-    tgt_atr_mult=tgt_atr_mult,
+    num_lots=num_lots,
 )
 
 st.markdown("---")
-st.subheader("📊 Performance Analytics")
-if not trades_df.empty:
-    total_trades = len(trades_df)
-    win_rate = (len(trades_df[trades_df["NetPnL"] > 0]) / total_trades) * 100
-    net_pnl = trades_df["NetPnL"].sum()
+st.subheader("📊 1-Month Performance Analytics")
 
-    b1, b2, b3 = st.columns(3)
-    b1.metric("Total Trades", total_trades)
-    b2.metric("Win Rate %", f"{win_rate:.1f}%")
-    b3.metric("Net Profit/Loss", f"₹{net_pnl:,.2f}")
+if not trades_1m.empty:
+    total_trades_1m = len(trades_1m)
+    win_rate_1m = (
+        len(trades_1m[trades_1m["NetPnL"] > 0]) / total_trades_1m
+    ) * 100
+    net_pnl_1m = trades_1m["NetPnL"].sum()
+    return_on_capital_1m = (net_pnl_1m / capital) * 100
 
-    st.dataframe(trades_df, use_container_width=True)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Trades (1Mo)", total_trades_1m)
+    m2.metric("Win Rate %", f"{win_rate_1m:.1f}%")
+    m3.metric("Net Profit / Loss", f"₹{net_pnl_1m:,.2f}")
+    m4.metric(
+        f"1-Mo Return on Capital (₹{capital/100000:.1f}L)",
+        f"{return_on_capital_1m:+.2f}%",
+    )
+
+    # Format Table Display
+    display_df = trades_1m.copy()
+
+    # Colorize BUY and SELL Tags
+    display_df["Type"] = display_df["Type"].apply(
+        lambda x: f"🟢 BUY" if x == "BUY" else f"🔴 SELL"
+    )
+
+    # Rename Charges Column as requested
+    display_df.rename(
+        columns={"Charges": "Charges (~₹60 <considering single lot>)"},
+        inplace=True,
+    )
+
+    st.dataframe(display_df, use_container_width=True)
 else:
-    st.info("No trades triggered within the evaluated historical window.")
+    st.info("No trades triggered during the last 1-month period.")
+
+# 12-MONTH LONG-TERM PERFORMANCE DASHBOARD
+st.markdown("---")
+st.subheader("🗓️ 12-Month Extended Performance Analysis")
+
+trades_12m = run_institutional_backtest(
+    data,
+    rsi_oversold=rsi_oversold,
+    rsi_overbought=rsi_overbought,
+    num_lots=num_lots,
+)
+
+summary_12m = generate_12m_performance_summary(trades_12m, capital)
+
+if not summary_12m.empty:
+    st.dataframe(summary_12m, use_container_width=True)
+
+    # Visualizing Monthly Equity Curve
+    trades_12m["ExitDate"] = pd.to_datetime(trades_12m["ExitTime"]).dt.date
+    daily_equity = trades_12m.groupby("ExitDate")["NetPnL"].sum().cumsum()
+
+    fig_eq = go.Figure()
+    fig_eq.add_trace(
+        go.Scatter(
+            x=daily_equity.index,
+            y=daily_equity.values,
+            mode="lines+markers",
+            name="Cumulative PnL",
+            line=dict(color="#2ecc71", width=2),
+        )
+    )
+    fig_eq.update_layout(
+        title="12-Month Cumulative Equity Growth Curve (₹)",
+        xaxis_title="Date",
+        yaxis_title="Net PnL (₹)",
+        template="plotly_dark",
+        height=350,
+    )
+    st.plotly_chart(fig_eq, use_container_width=True)
+else:
+    st.info("Insufficient historical data to generate 12-month summary.")
     
