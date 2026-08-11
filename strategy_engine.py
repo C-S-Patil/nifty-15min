@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import pytz
 import requests
-import streamlit as st
 import ta
 import yfinance as yf
 
@@ -10,9 +9,7 @@ import yfinance as yf
 def fetch_and_prepare_data(
     ticker: str = "^NSEI", interval: str = "15m", period: str = "1mo"
 ) -> pd.DataFrame:
-    """Fetches intraday data with step-by-step diagnostic logging."""
-    st.info(f"🔍 [LOG 1] Starting data fetch for Ticker: `{ticker}`")
-
+    """Fetches intraday data with proper NaN forward-fill to prevent data wipeout."""
     try:
         session = requests.Session()
         session.headers.update(
@@ -21,16 +18,10 @@ def fetch_and_prepare_data(
             }
         )
 
-        st.info("📡 [LOG 2] Querying Yahoo Finance Ticker history...")
         dat = yf.Ticker(ticker, session=session)
         df_15m = dat.history(interval=interval, period=period)
 
-        st.write(f"📊 [LOG 3] Ticker history returned rows: `{len(df_15m)}`")
-
         if df_15m.empty:
-            st.warning(
-                "⚠️ [LOG 4] `dat.history` returned empty. Trying fallback `yf.download`..."
-            )
             df_15m = yf.download(
                 ticker,
                 interval=interval,
@@ -38,17 +29,10 @@ def fetch_and_prepare_data(
                 progress=False,
                 session=session,
             )
-            st.write(
-                f"📊 [LOG 4.1] Fallback download returned rows: `{len(df_15m)}`"
-            )
 
         if df_15m.empty:
-            st.error(
-                "❌ [LOG 5] Both `dat.history` and `yf.download` returned empty DataFrames."
-            )
             return pd.DataFrame()
 
-        # Handle MultiIndex columns
         if isinstance(df_15m.columns, pd.MultiIndex):
             df_15m.columns = df_15m.columns.get_level_values(0)
 
@@ -59,10 +43,9 @@ def fetch_and_prepare_data(
         else:
             df_15m.index = df_15m.index.tz_convert(ist)
 
-        st.info(f"🕒 [LOG 6] Timezone converted to IST. Cleaning NAs...")
         df_15m.dropna(subset=["Close", "Volume"], inplace=True)
 
-        st.info("📈 [LOG 7] Fetching Daily 50 EMA Higher Timeframe data...")
+        # Daily HTF Data
         df_daily = dat.history(interval="1d", period="1y")
         if df_daily.empty:
             df_daily = yf.download(
@@ -86,8 +69,7 @@ def fetch_and_prepare_data(
         ).ema_indicator()
         df_daily["Date"] = df_daily.index.date
 
-        # Process Intraday VWAP & Indicators
-        st.info("🧮 [LOG 8] Calculating VWAP, RSI, and ATR...")
+        # Calculate Intraday VWAP & Indicators
         df_15m["Date"] = df_15m.index.date
         df_15m["Time"] = df_15m.index.time
         df_15m["TypicalPrice"] = (
@@ -111,18 +93,15 @@ def fetch_and_prepare_data(
 
         daily_ema_map = df_daily.set_index("Date")["Daily_EMA50"].to_dict()
         df_15m["Daily_EMA50"] = df_15m["Date"].map(daily_ema_map)
-        df_15m["Daily_EMA50"] = df_15m["Daily_EMA50"].ffill()
 
-        st.success(
-            f"✅ [LOG 9] Data preparation completed successfully! Final Rows: `{len(df_15m)}`"
-        )
-        return df_15m.dropna()
+        # Forward fill and backward fill missing indicator values instead of dropping rows
+        df_15m.ffill(inplace=True)
+        df_15m.bfill(inplace=True)
+
+        return df_15m
 
     except Exception as e:
-        st.error(f"💥 [CRITICAL ERROR IN STRATEGY ENGINE]: {e}")
-        import traceback
-
-        st.code(traceback.format_exc())
+        print(f"Data Processing Error: {e}")
         return pd.DataFrame()
 
 
