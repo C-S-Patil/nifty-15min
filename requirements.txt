@@ -6,3 +6,4 @@ ta>=0.10.2
 requests>=2.31.0
 kiteconnect>=4.0.0
 pytz>=2023.3
+plotly>=5.18.0
