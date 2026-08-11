@@ -1,23 +1,33 @@
-import json
 import os
 import requests
+import streamlit as st
 from kiteconnect import KiteConnect
 
-# Load Environment / Secrets
-KITE_API_KEY = os.getenv("KITE_API_KEY", "")
-KITE_ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# Retrieve credentials from Streamlit secrets or OS environment
+TELEGRAM_BOT_TOKEN = st.secrets.get(
+    "TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", "")
+)
+TELEGRAM_CHAT_ID = st.secrets.get(
+    "TELEGRAM_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "")
+)
+KITE_API_KEY = st.secrets.get("KITE_API_KEY", os.getenv("KITE_API_KEY", ""))
+KITE_ACCESS_TOKEN = st.secrets.get(
+    "KITE_ACCESS_TOKEN", os.getenv("KITE_ACCESS_TOKEN", "")
+)
 
 
-def send_telegram_alert(message: str):
-    """Sends immediate Markdown alerts to your Telegram Channel/Bot."""
+def send_telegram_alert(message: str) -> bool:
+    """Sends Markdown alerts to Telegram. Logs to console/UI if credentials missing."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram tokens missing.")
-        return
+        st.warning(
+            "⚠️ [LOG] Telegram Bot Token or Chat ID not configured. Skipping Telegram alert."
+        )
+        print("Telegram credentials missing.")
+        return False
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(
+        response = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -26,69 +36,81 @@ def send_telegram_alert(message: str):
             },
             timeout=5,
         )
+        if response.status_code == 200:
+            st.info("📨 [LOG] Telegram alert dispatched successfully.")
+            return True
+        else:
+            st.error(
+                f"❌ [LOG] Telegram API Error: {response.status_code} - {response.text}"
+            )
+            return False
     except Exception as e:
-        print(f"Telegram Alert Failed: {e}")
+        st.error(f"❌ [LOG] Telegram connection exception: {e}")
+        return False
 
 
-def execute_paper_order(
+def execute_auto_trade(
     symbol: str, action: str, price: float, num_lots: int, reason: str = ""
 ):
-    """Logs simulated paper trade execution and triggers Telegram alert."""
-    qty = num_lots * 75
+    """Unified Order Execution Pipeline: Always dispatches Telegram alert and attempts Kite Live Order.
+
+    Falls back to Paper Trading log if Kite secrets are unconfigured.
+    """
+    total_qty = num_lots * 75
+
+    # 1. Dispatch Telegram Alert
     alert_msg = (
-        f"📄 *PAPER TRADE {action} ALERT*\n\n"
+        f"🚨 *NIFTY {action} SIGNAL DETECTED* ⚡\n\n"
         f"📌 *Asset:* {symbol}\n"
-        f"📈 *Price:* ₹{price:.2f}\n"
-        f"📦 *Quantity:* {qty} ({num_lots} Lot{'s' if num_lots > 1 else ''})\n"
+        f"📈 *Signal Price:* ₹{price:.2f}\n"
+        f"📦 *Order Quantity:* {total_qty} ({num_lots} Lot{'s' if num_lots > 1 else ''})\n"
         f"💡 *Trigger Reason:* {reason}"
     )
     send_telegram_alert(alert_msg)
-    return {"status": "SUCCESS", "mode": "PAPER", "price": price, "qty": qty}
 
+    # 2. Attempt Live Kite Order Execution
+    if KITE_API_KEY and KITE_ACCESS_TOKEN:
+        try:
+            kite = KiteConnect(api_key=KITE_API_KEY)
+            kite.set_access_token(KITE_ACCESS_TOKEN)
 
-def execute_live_kite_order(
-    symbol: str, action: str, price: float, num_lots: int
-):
-    """Places live Market Order via Zerodha Kite Connect API."""
-    if not KITE_API_KEY or not KITE_ACCESS_TOKEN:
-        err_msg = "⚠️ *LIVE KITE ORDER FAILED*: API Key or Access Token missing in Secrets."
-        send_telegram_alert(err_msg)
-        return {"status": "FAILED", "reason": "Missing Kite Credentials"}
+            transaction_type = (
+                kite.TRANSACTION_TYPE_BUY
+                if action == "BUY"
+                else kite.TRANSACTION_TYPE_SELL
+            )
+            trading_symbol = "NIFTY24AUGFUT"
 
-    try:
-        kite = KiteConnect(api_key=KITE_API_KEY)
-        kite.set_access_token(KITE_ACCESS_TOKEN)
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=kite.EXCHANGE_NFO,
+                tradingsymbol=trading_symbol,
+                transaction_type=transaction_type,
+                quantity=total_qty,
+                product=kite.PRODUCT_MIS,
+                order_type=kite.ORDER_TYPE_MARKET,
+            )
 
-        transaction_type = (
-            kite.TRANSACTION_TYPE_BUY
-            if action == "BUY"
-            else kite.TRANSACTION_TYPE_SELL
+            success_msg = f"🚀 *LIVE KITE ORDER PLACED*\nOrder ID: `{order_id}` | Qty: {total_qty}"
+            send_telegram_alert(success_msg)
+            st.success(f"🚀 Live Kite Order Placed! Order ID: {order_id}")
+            return {"status": "LIVE_SUCCESS", "order_id": order_id}
+
+        except Exception as e:
+            err_msg = f"❌ *Kite Order Failed*: {str(e)} | Executed in Paper Mode."
+            send_telegram_alert(err_msg)
+            st.error(f"❌ Kite Order Error: {e}")
+            return {"status": "PAPER_FALLBACK", "reason": str(e)}
+
+    else:
+        # Fallback to Paper Trade Log if Kite Credentials are missing
+        st.warning(
+            "ℹ️ [LOG] Zerodha Kite credentials not found in secrets. Defaulting order to Paper Trade Log."
         )
-        trading_symbol = "NIFTY24AUGFUT"  # Maps to active futures contract
-
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=trading_symbol,
-            transaction_type=transaction_type,
-            quantity=num_lots * 75,
-            product=kite.PRODUCT_MIS,  # Intraday MIS
-            order_type=kite.ORDER_TYPE_MARKET,
-        )
-
-        alert_msg = (
-            f"🚀 *LIVE KITE ORDER EXECUTED* 🟢\n\n"
-            f"🆔 *Order ID:* `{order_id}`\n"
-            f"📌 *Symbol:* {trading_symbol}\n"
-            f"⚡ *Action:* {action}\n"
-            f"📦 *Qty:* {num_lots * 75} ({num_lots} Lots)\n"
-            f"💰 *Execution Price:* ~₹{price:.2f}"
-        )
-        send_telegram_alert(alert_msg)
-        return {"status": "SUCCESS", "order_id": order_id}
-
-    except Exception as e:
-        err_msg = f"❌ *LIVE KITE ORDER ERROR*: {str(e)}"
-        send_telegram_alert(err_msg)
-        return {"status": "FAILED", "reason": str(e)}
+        return {
+            "status": "PAPER_LOGGED",
+            "price": price,
+            "qty": total_qty,
+            "reason": reason,
+        }
         
