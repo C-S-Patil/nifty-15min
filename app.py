@@ -1,4 +1,5 @@
 import datetime
+import pandas as pd
 import plotly.graph_objects as go
 import pytz
 import streamlit as st
@@ -13,13 +14,12 @@ st.set_page_config(
     page_title="Nifty Quant Strategy Engine", page_icon="⚡", layout="wide"
 )
 
-# Custom CSS for Colored Badges
+# Custom CSS for UI styling
 st.markdown(
     """
 <style>
     .buy-tag { background-color: #1e4620; color: #2ecc71; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
     .sell-tag { background-color: #4a1515; color: #e74c3c; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
-    .metric-card { background-color: #1e222d; padding: 15px; border-radius: 8px; border: 1px solid #2a2e39; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -27,12 +27,14 @@ st.markdown(
 
 st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
 
-# Sidebar Capital & Position Controls
+# Sidebar Controls
 st.sidebar.header("💰 Capital & Order Sizing")
 capital = st.sidebar.number_input(
     "Trading Capital (₹)", value=250000.0, step=25000.0, format="%.2f"
 )
-num_lots = st.sidebar.slider("Number of Lots", min_value=1, max_value=20, value=1)
+num_lots = st.sidebar.slider(
+    "Number of Lots", min_value=1, max_value=20, value=1
+)
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Strategy Parameters")
@@ -50,8 +52,8 @@ if data.empty:
     st.error(f"❌ Failed to fetch market data for {selected_symbol}.")
     st.stop()
 
-# Filter Last 30 Days Data for 1-Month Analytics View
-one_month_data = data.tail(22 * 25)  # Approx 22 trading days of 15m candles
+# Filter Last 30 Days Data
+one_month_data = data.tail(22 * 25)
 
 # Live Status Banner
 ist = pytz.timezone("Asia/Kolkata")
@@ -122,7 +124,7 @@ fig.update_layout(
     yaxis=dict(range=[min_y, max_y], title="Price (₹)"),
     xaxis=dict(title="Time (IST)"),
     template="plotly_dark",
-    height=450,
+    height=420,
 )
 st.plotly_chart(fig, use_container_width=True)
 
@@ -154,21 +156,23 @@ if not trades_1m.empty:
         f"{return_on_capital_1m:+.2f}%",
     )
 
-    # Format Table Display
     display_df = trades_1m.copy()
-
-    # Colorize BUY and SELL Tags
     display_df["Type"] = display_df["Type"].apply(
-        lambda x: f"🟢 BUY" if x == "BUY" else f"🔴 SELL"
+        lambda x: "🟢 BUY" if x == "BUY" else "🔴 SELL"
     )
 
-    # Rename Charges Column as requested
-    display_df.rename(
-        columns={"Charges": "Charges (~₹60 <considering single lot>)"},
-        inplace=True,
+    # Render Table with Short Column Header and Hover Tooltip ℹ️
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        column_config={
+            "Charges": st.column_config.NumberColumn(
+                "Charges (₹)",
+                help="Estimated exchange brokerage & STT (~₹60 roundtrip per lot)",
+                format="₹%.2f",
+            )
+        },
     )
-
-    st.dataframe(display_df, use_container_width=True)
 else:
     st.info("No trades triggered during the last 1-month period.")
 
@@ -188,28 +192,31 @@ summary_12m = generate_12m_performance_summary(trades_12m, capital)
 if not summary_12m.empty:
     st.dataframe(summary_12m, use_container_width=True)
 
-    # Visualizing Monthly Equity Curve
-    trades_12m["ExitDate"] = pd.to_datetime(trades_12m["ExitTime"]).dt.date
-    daily_equity = trades_12m.groupby("ExitDate")["NetPnL"].sum().cumsum()
+    # Cumulative Equity Curve Plot
+    if "ExitTime" in trades_12m.columns and not trades_12m.empty:
+        trades_12m["ExitDate"] = pd.to_datetime(
+            trades_12m["ExitTime"]
+        ).dt.date
+        daily_equity = trades_12m.groupby("ExitDate")["NetPnL"].sum().cumsum()
 
-    fig_eq = go.Figure()
-    fig_eq.add_trace(
-        go.Scatter(
-            x=daily_equity.index,
-            y=daily_equity.values,
-            mode="lines+markers",
-            name="Cumulative PnL",
-            line=dict(color="#2ecc71", width=2),
+        fig_eq = go.Figure()
+        fig_eq.add_trace(
+            go.Scatter(
+                x=daily_equity.index,
+                y=daily_equity.values,
+                mode="lines+markers",
+                name="Cumulative PnL",
+                line=dict(color="#2ecc71", width=2),
+            )
         )
-    )
-    fig_eq.update_layout(
-        title="12-Month Cumulative Equity Growth Curve (₹)",
-        xaxis_title="Date",
-        yaxis_title="Net PnL (₹)",
-        template="plotly_dark",
-        height=350,
-    )
-    st.plotly_chart(fig_eq, use_container_width=True)
+        fig_eq.update_layout(
+            title="12-Month Cumulative Equity Growth Curve (₹)",
+            xaxis_title="Date",
+            yaxis_title="Net PnL (₹)",
+            template="plotly_dark",
+            height=350,
+        )
+        st.plotly_chart(fig_eq, use_container_width=True)
 else:
     st.info("Insufficient historical data to generate 12-month summary.")
     
