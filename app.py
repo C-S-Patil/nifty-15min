@@ -1,8 +1,6 @@
 import datetime
-import pandas as pd
-import requests
+import pytz
 import streamlit as st
-from execution_engine import execute_live_kite_order, execute_paper_order
 from strategy_engine import fetch_and_prepare_data, run_institutional_backtest
 
 st.set_page_config(
@@ -11,9 +9,9 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
+st.title("⚡ Nifty 15-Min Quant Strategy Engine")
 
-# 1. Define Sidebar Controls FIRST
+# Sidebar Controls
 st.sidebar.header("⚙️ Strategy & Execution")
 symbol_map = {"Nifty 50": "^NSEI", "Bank Nifty": "^NSEBANK"}
 selected_symbol = st.sidebar.selectbox("Select Asset", list(symbol_map.keys()))
@@ -28,29 +26,29 @@ rsi_overbought = st.sidebar.slider("RSI Overbought", 55, 75, 62)
 sl_atr_mult = st.sidebar.slider("SL ATR Multiplier", 0.5, 3.0, 1.5)
 tgt_atr_mult = st.sidebar.slider("TGT ATR Multiplier", 1.5, 5.0, 2.5)
 
-# 2. Fetch Data using the defined ticker
+# Fetch Data with 1 Month Window to ensure sufficient 15m bars
 try:
-    data = fetch_and_prepare_data(ticker=ticker, period="5d")
+    data = fetch_and_prepare_data(ticker=ticker, period="1 mo")
 except Exception as err:
     st.error(f"❌ Data Fetch Error: {err}")
-    st.info(
-        "Tip: Yahoo Finance occasionally rate-limits Streamlit Cloud IP ranges. Try clearing app cache or re-deploying."
-    )
     st.stop()
 
 if data.empty:
     st.warning(
-        f"⚠️ No market data returned for {selected_symbol}. Verify market hours or interval settings."
+        f"⚠️ No market data returned for {selected_symbol}. Please check internet connection or retry shortly."
     )
     st.stop()
 
-# 3. Main Dashboard & Charts
+# Get Current IST Time
+ist = pytz.timezone("Asia/Kolkata")
 latest = data.iloc[-1]
+last_time_ist = latest.name.strftime("%Y-%m-%d %H:%M IST")
+
 trend_state = (
     "BULLISH 🟢" if latest["Close"] > latest["Daily_EMA50"] else "BEARISH 🔴"
 )
 
-st.subheader(f"Current Market Status ({selected_symbol})")
+st.subheader(f"Current Market Status ({selected_symbol}) — {last_time_ist}")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Close Price", f"₹{latest['Close']:.2f}")
 c2.metric("VWAP", f"₹{latest['VWAP']:.2f}")
@@ -59,7 +57,7 @@ c4.metric("Daily Trend", trend_state)
 
 st.line_chart(data[["Close", "VWAP", "VWAP_Upper", "VWAP_Lower"]].tail(100))
 
-# 4. Run Backtest
+# Backtest Performance
 trades_df = run_institutional_backtest(
     data,
     rsi_oversold=rsi_oversold,
