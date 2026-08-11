@@ -1,3 +1,4 @@
+import io
 from datetime import time
 import numpy as np
 import pandas as pd
@@ -5,6 +6,26 @@ import pytz
 import requests
 import ta
 import yfinance as yf
+
+# Map symbols to Yahoo Finance Tickers and default F&O Lot Sizes
+SYMBOL_MAP = {
+    "Nifty 50": {"ticker": "^NSEI", "lot_size": 75},
+    "Bank Nifty": {"ticker": "^NSEBANK", "lot_size": 15},
+    "TCS": {"ticker": "TCS.NS", "lot_size": 175},
+    "Infosys (INFY)": {"ticker": "INFY.NS", "lot_size": 400},
+    "State Bank of India (SBIN)": {"ticker": "SBIN.NS", "lot_size": 750},
+    "HDFC Bank": {"ticker": "HDFCBANK.NS", "lot_size": 550},
+    "Reliance Industries": {"ticker": "RELIANCE.NS", "lot_size": 250},
+    "ICICI Bank": {"ticker": "ICICIBANK.NS", "lot_size": 700},
+}
+
+
+def export_trades_to_excel(trades_df: pd.DataFrame) -> bytes:
+    """Converts the trades DataFrame into an Excel file bytes stream for Streamlit download."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        trades_df.to_excel(writer, index=False, sheet_name="Executed Trades")
+    return output.getvalue()
 
 
 def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
