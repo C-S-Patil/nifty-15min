@@ -31,15 +31,43 @@ def run_institutional_backtest(
 ) -> pd.DataFrame:
     # Existing backtest calculation logic...
     pass
-    
 
 
 def export_trades_to_excel(trades_df: pd.DataFrame) -> bytes:
-    """Converts the trades DataFrame into an Excel file bytes stream for Streamlit download."""
+    """Converts the trades DataFrame into an Excel file bytes stream, removing timezone information to prevent Excel ValueError."""
+    if trades_df.empty:
+        return b""
+
+    df_export = trades_df.copy()
+
+    # Convert or strip timezones from datetime columns
+    for col in df_export.select_dtypes(
+        include=["datetime64[ns, Asia/Kolkata]", "datetime64[ns, UTC]", "datetimetz"]
+    ).columns:
+        df_export[col] = df_export[col].dt.tz_localize(None)
+
+    # Also handle string timestamps if they contain timezone offsets
+    if "EntryTime" in df_export.columns:
+        df_export["EntryTime"] = (
+            pd.to_datetime(df_export["EntryTime"])
+            .dt.tz_localize(None)
+            .dt.strftime("%Y-%m-%d %H:%M:%S")
+        )
+
+    if "ExitTime" in df_export.columns:
+        df_export["ExitTime"] = (
+            pd.to_datetime(df_export["ExitTime"])
+            .dt.tz_localize(None)
+            .dt.strftime("%Y-%m-%d %H:%M:%S")
+        )
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        trades_df.to_excel(writer, index=False, sheet_name="Executed Trades")
+        df_export.to_excel(writer, index=False, sheet_name="Executed Trades")
+
+    output.seek(0)
     return output.getvalue()
+    
 
 
 def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
