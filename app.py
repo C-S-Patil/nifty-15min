@@ -47,11 +47,14 @@ c3.metric("RSI", f"{latest['RSI']:.1f}")
 c4.metric("Daily Trend", trend_state)
 
 # Plotly Interactive Chart with Custom Y-Axis Bounds (+10 / -10)
-recent_data = data.tail(100)
+# In app.py under the chart section:
+
+recent_data = data.tail(120)  # ~5 trading days of 15m candles
 min_y = float(recent_data["Low"].min()) - 10.0
 max_y = float(recent_data["High"].max()) + 10.0
 
 fig = go.Figure()
+
 fig.add_trace(
     go.Scatter(
         x=recent_data.index,
@@ -89,8 +92,16 @@ fig.add_trace(
     )
 )
 
+# Configure Axis & Hide Overnight / Weekend Gaps
+fig.update_xaxes(
+    rangebreaks=[
+        dict(bounds=["sat", "mon"]),  # Hide Weekends
+        dict(bounds=[15.5, 9.25], pattern="hour"),  # Hide Overnight 15:30 to 09:15
+    ]
+)
+
 fig.update_layout(
-    title=f"{selected_symbol} 15-Min Chart with VWAP Envelopes",
+    title=f"{selected_symbol} Active Trading Sessions (09:15 - 15:30 IST)",
     yaxis=dict(range=[min_y, max_y], title="Price (₹)"),
     xaxis=dict(title="Time (IST)"),
     margin=dict(l=20, r=20, t=40, b=20),
