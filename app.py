@@ -13,8 +13,121 @@ from strategy_engine import (
     run_institutional_backtest,
 )
 
+# Optional import for Zerodha KiteConnect with fallback
+try:
+    from kiteconnect import KiteConnect
+
+    KITE_AVAILABLE = True
+except ImportError:
+    KITE_AVAILABLE = False
+
+
+# ------------------------------------------------------------------
+# EXECUTION ENGINE FUNCTIONS (Telegram & Zerodha Kite)
+# ------------------------------------------------------------------
+def send_telegram_alert(message: str) -> bool:
+    """Dispatches Markdown alerts to Telegram channel/bot."""
+    bot_token = st.secrets.get(
+        "TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", "")
+    )
+    chat_id = st.secrets.get(
+        "TELEGRAM_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", "")
+    )
+
+    if not bot_token or not chat_id:
+        st.warning(
+            "⚠️ [LOG] Telegram Bot Token or Chat ID not configured in Streamlit Secrets."
+        )
+        return False
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        res = requests.post(
+            url,
+            data={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "Markdown",
+            },
+            timeout=5,
+        )
+        if res.status_code == 200:
+            st.info("📨 [LOG] Telegram alert sent successfully.")
+            return True
+        else:
+            st.error(f"❌ [LOG] Telegram Error: {res.status_code} - {res.text}")
+            return False
+    except Exception as e:
+        st.error(f"❌ [LOG] Telegram Exception: {e}")
+        return False
+
+
+def execute_auto_trade(
+    symbol: str,
+    action: str,
+    price: float,
+    num_lots: int,
+    lot_size: int = 65,
+    reason: str = "",
+):
+    """Unified Order Execution: Dispatches Telegram alert and attempts Kite Live Order."""
+    total_qty = num_lots * lot_size
+
+    # 1. Dispatch Telegram Alert
+    alert_msg = (
+        f"🚨 *{symbol} {action} SIGNAL DETECTED* ⚡\n\n"
+        f"📌 *Asset:* {symbol}\n"
+        f"📈 *Signal Price:* ₹{price:.2f}\n"
+        f"📦 *Quantity:* {total_qty} ({num_lots} Lot{'s' if num_lots > 1 else ''} @ {lot_size}/lot)\n"
+        f"💡 *Trigger Reason:* {reason}"
+    )
+    send_telegram_alert(alert_msg)
+
+    # 2. Kite Live Order Execution (with Paper Fallback)
+    api_key = st.secrets.get("KITE_API_KEY", os.getenv("KITE_API_KEY", ""))
+    access_token = st.secrets.get(
+        "KITE_ACCESS_TOKEN", os.getenv("KITE_ACCESS_TOKEN", "")
+    )
+
+    if KITE_AVAILABLE and api_key and access_token:
+        try:
+            kite = KiteConnect(api_key=api_key)
+            kite.set_access_token(access_token)
+
+            tx_type = (
+                kite.TRANSACTION_TYPE_BUY
+                if action == "BUY"
+                else kite.TRANSACTION_TYPE_SELL
+            )
+            order_id = kite.place_order(
+                variety=kite.VARIETY_REGULAR,
+                exchange=kite.EXCHANGE_NFO,
+                tradingsymbol="NIFTY24AUGFUT",
+                transaction_type=tx_type,
+                quantity=total_qty,
+                product=kite.PRODUCT_MIS,
+                order_type=kite.ORDER_TYPE_MARKET,
+            )
+            st.success(f"🚀 Live Kite Order Placed! Order ID: `{order_id}`")
+            send_telegram_alert(
+                f"🚀 *LIVE ORDER EXECUTED*\nOrder ID: `{order_id}` | Qty: {total_qty}"
+            )
+            return {"status": "LIVE_SUCCESS", "order_id": order_id}
+        except Exception as e:
+            st.error(f"❌ Kite Order Error: {e}")
+            return {"status": "FAILED", "reason": str(e)}
+    else:
+        st.warning(
+            "ℹ️ [LOG] Zerodha Kite credentials or package missing. Execution logged in Paper Mode."
+        )
+        return {"status": "PAPER_LOGGED"}
+
+
+# ------------------------------------------------------------------
+# STREAMLIT UI DASHBOARD
+# ------------------------------------------------------------------
 st.set_page_config(
-    page_title="Nifty & Stocks Quant Engine", page_icon="⚡", layout="wide"
+    page_title="Quant Strategy & Execution Engine", page_icon="⚡", layout="wide"
 )
 
 st.title("⚡ Quant Strategy & Execution Engine (Indices & Stocks)")
@@ -43,7 +156,7 @@ st.sidebar.header("⚙️ Strategy Parameters")
 rsi_oversold = st.sidebar.slider("RSI Oversold Filter", 25, 45, 38)
 rsi_overbought = st.sidebar.slider("RSI Overbought Filter", 55, 75, 62)
 
-# Load Historical Data for Selected Asset
+# Load Historical Market Data
 data = fetch_and_prepare_data(ticker=ticker, period="1y")
 
 if data.empty:
@@ -53,7 +166,7 @@ if data.empty:
 one_month_data = data.tail(22 * 25)
 
 # ------------------------------------------------------------------
-# SECTION 1: ACTIVE POSITION & CHART
+# SECTION 1: OPEN TRADES & LIVE CHART (FIRST)
 # ------------------------------------------------------------------
 st.subheader(f"📌 Active Market Monitor — {selected_symbol_name}")
 
@@ -68,6 +181,46 @@ c1.metric("Close Price", f"₹{latest['Close']:.2f}")
 c2.metric("VWAP", f"₹{latest['VWAP']:.2f}")
 c3.metric("RSI (14)", f"{latest['RSI']:.1f}")
 c4.metric("Daily Trend", trend_state)
+
+# Signal Evaluation
+latest_signal = "HOLD"
+if latest["Close"] < latest["VWAP_Lower"] and latest["RSI"] < rsi_oversold:
+    latest_signal = "BUY"
+elif latest["Close"] > latest["VWAP_Upper"] and latest["RSI"] > rsi_overbought:
+    latest_signal = "SELL"
+
+if latest_signal == "BUY":
+    st.success(
+        f"🟢 **BUY SIGNAL ACTIVE** at ₹{latest['Close']:.2f} | VWAP Lower: ₹{latest['VWAP_Lower']:.2f}"
+    )
+    if st.button("Dispatch Auto-Trade (Telegram + Kite)"):
+        execute_auto_trade(
+            selected_symbol_name,
+            "BUY",
+            latest["Close"],
+            num_lots,
+            default_lot_size,
+            "RSI Oversold + VWAP Dip",
+        )
+
+elif latest_signal == "SELL":
+    st.error(
+        f"🔴 **SELL SIGNAL ACTIVE** at ₹{latest['Close']:.2f} | VWAP Upper: ₹{latest['VWAP_Upper']:.2f}"
+    )
+    if st.button("Dispatch Auto-Trade (Telegram + Kite)"):
+        execute_auto_trade(
+            selected_symbol_name,
+            "SELL",
+            latest["Close"],
+            num_lots,
+            default_lot_size,
+            "RSI Overbought + VWAP Spike",
+        )
+
+else:
+    st.info(
+        "⚪ **No active entry signals on the current candle.** Strategy Status: HOLD"
+    )
 
 # Plotly Active Hours Chart
 recent_chart = data.tail(120)
@@ -128,7 +281,7 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------------
-# SECTION 2: 1-MONTH PERFORMANCE ANALYTICS & EXCEL DOWNLOAD
+# SECTION 2: 1-MONTH PERFORMANCE ANALYTICS & EXCEL DOWNLOAD (SECOND)
 # ------------------------------------------------------------------
 st.markdown("---")
 st.subheader("📊 Current Month Executed Trades & Performance")
@@ -184,7 +337,7 @@ else:
     st.info("No trades triggered during the current month period.")
 
 # ------------------------------------------------------------------
-# SECTION 3: 12-MONTH MONTHLY BREAKDOWN
+# SECTION 3: 12-MONTH MONTHLY BREAKDOWN (THIRD)
 # ------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🗓️ Last 12 Months Performance Breakdown")
@@ -199,5 +352,48 @@ trades_12m = run_institutional_backtest(
 
 if not trades_12m.empty:
     monthly_table = generate_monthly_breakdown(trades_12m, capital)
-    st.dataframe(monthly_table, use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        monthly_table,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Actual Profit %": st.column_config.TextColumn(
+                "Actual Profit %",
+                help="Net Return percentage calculated on capital input",
+            )
+        },
+    )
+
+    trades_12m["YearMonth"] = pd.to_datetime(
+        trades_12m["ExitTime"]
+    ).dt.strftime("%b %Y")
+    monthly_pnl_series = trades_12m.groupby("YearMonth", sort=False)[
+        "NetPnL"
+    ].sum()
+
+    colors = [
+        "#2ecc71" if val >= 0 else "#e74c3c"
+        for val in monthly_pnl_series.values
+    ]
+
+    fig_bar = go.Figure(
+        data=[
+            go.Bar(
+                x=monthly_pnl_series.index,
+                y=monthly_pnl_series.values,
+                marker_color=colors,
+            )
+        ]
+    )
+    fig_bar.update_layout(
+        title="Monthly Net Profit / Loss Breakdown (₹)",
+        xaxis_title="Month",
+        yaxis_title="Net PnL (₹)",
+        template="plotly_dark",
+        height=380,
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+else:
+    st.info("Insufficient historical data to generate 12-month summary.")
     
