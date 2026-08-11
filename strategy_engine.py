@@ -1,3 +1,4 @@
+from datetime import time
 import numpy as np
 import pandas as pd
 import pytz
@@ -7,18 +8,23 @@ import yfinance as yf
 
 
 def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
+    """Filters data to retain only active trading sessions (09:15 - 15:30 IST + Samvat)."""
     if df.empty:
         return df
+
     times = df.index.time
-    standard_start = datetime.time(9, 15)
-    standard_end = datetime.time(15, 30)
-    muhurat_start = datetime.time(18, 0)
-    muhurat_end = datetime.time(19, 30)
+    standard_start = time(9, 15)
+    standard_end = time(15, 30)
+    muhurat_start = time(18, 0)
+    muhurat_end = time(19, 30)
 
     standard_mask = (times >= standard_start) & (times <= standard_end)
     muhurat_mask = (times >= muhurat_start) & (times <= muhurat_end)
 
-    return df[standard_mask | muhurat_mask].copy()
+    filtered_df = df[standard_mask | muhurat_mask].copy()
+
+    # Safety: If filtering strips everything, return original dataframe
+    return filtered_df if not filtered_df.empty else df
 
 
 def fetch_and_prepare_data(
@@ -28,7 +34,7 @@ def fetch_and_prepare_data(
         session = requests.Session()
         session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
         )
 
@@ -50,6 +56,7 @@ def fetch_and_prepare_data(
         if isinstance(df_15m.columns, pd.MultiIndex):
             df_15m.columns = df_15m.columns.get_level_values(0)
 
+        # 1. Timezone Normalization to IST
         ist = pytz.timezone("Asia/Kolkata")
         if df_15m.index.tzinfo is None:
             df_15m.index = df_15m.index.tz_localize("UTC").tz_convert(ist)
@@ -57,14 +64,17 @@ def fetch_and_prepare_data(
             df_15m.index = df_15m.index.tz_convert(ist)
 
         df_15m.dropna(subset=["Close"], inplace=True)
+
+        # 2. Filter Market Hours safely
         df_15m = filter_active_market_hours(df_15m)
 
+        # 3. Handle Volume Fallback for Index Tickers
         if df_15m["Volume"].sum() == 0 or df_15m["Volume"].isna().all():
             df_15m["Volume"] = (df_15m["High"] - df_15m["Low"]).replace(
                 0, 0.01
             )
 
-        # Daily HTF Data
+        # 4. Daily HTF Data for 50 EMA Filter
         df_daily = dat.history(interval="1d", period="1y")
         if df_daily.empty:
             df_daily = yf.download(
@@ -88,7 +98,7 @@ def fetch_and_prepare_data(
         ).ema_indicator()
         df_daily["Date"] = df_daily.index.date
 
-        # Intraday VWAP & Indicators
+        # 5. Calculate Indicators & VWAP
         df_15m["Date"] = df_15m.index.date
         df_15m["Time"] = df_15m.index.time
         df_15m["TypicalPrice"] = (
@@ -127,12 +137,11 @@ def run_institutional_backtest(
     df: pd.DataFrame,
     rsi_oversold: int = 38,
     rsi_overbought: int = 62,
-    sl_atr_mult: float = 2.0,  # Increased SL width to avoid whipsaws
+    sl_atr_mult: float = 2.0,
     tgt_atr_mult: float = 3.0,
     lot_size: int = 75,
-    flat_brokerage_per_trade: float = 40.0,  # Real Zerodha Flat Brokerage + STT
+    flat_brokerage_per_trade: float = 40.0,
 ) -> pd.DataFrame:
-    """Corrected Backtest with Flat Realistic Brokerage and Balanced Signals."""
     trades = []
     in_position = False
     pos_type = None
@@ -153,7 +162,7 @@ def run_institutional_backtest(
             exit_price = 0.0
             exit_reason = ""
 
-            if current_time >= datetime.time(15, 15):
+            if current_time >= time(15, 15):
                 exit_triggered = True
                 exit_price = close
                 exit_reason = "EOD Squareoff"
@@ -181,6 +190,7 @@ def run_institutional_backtest(
                     exit_reason = "Trailing SL Hit"
                 elif low <= tgt_price:
                     exit_triggered = True
+                    exit_price = tgt_price
                     exit_reason = "Target Hit"
 
             if exit_triggered:
@@ -190,7 +200,6 @@ def run_institutional_backtest(
                     else (entry_price - exit_price) * lot_size
                 )
 
-                # Realistic Intraday Charges (Flat ₹40 total roundtrip)
                 total_charges = flat_brokerage_per_trade
                 net_pnl = gross_pnl - total_charges
 
@@ -209,11 +218,9 @@ def run_institutional_backtest(
                 )
                 in_position = False
 
-        # Entry Logic (Without restricting SELL trades exclusively to Daily EMA)
-        if not in_position and current_time < datetime.time(14, 45):
+        if not in_position and current_time < time(14, 45):
             close = row["Close"]
 
-            # BUY CONDITION: Price below VWAP Lower Band + RSI Oversold
             if close < row["VWAP_Lower"] and row["RSI"] < rsi_oversold:
                 in_position = True
                 pos_type = "BUY"
@@ -222,7 +229,6 @@ def run_institutional_backtest(
                 trailing_sl = entry_price - (row["ATR"] * sl_atr_mult)
                 tgt_price = entry_price + (row["ATR"] * tgt_atr_mult)
 
-            # SELL CONDITION: Price above VWAP Upper Band + RSI Overbought
             elif close > row["VWAP_Upper"] and row["RSI"] > rsi_overbought:
                 in_position = True
                 pos_type = "SELL"
