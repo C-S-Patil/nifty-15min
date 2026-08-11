@@ -8,6 +8,7 @@ import yfinance as yf
 
 
 def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
+    """Filters data to retain only active trading sessions (09:15 - 15:30 IST + Samvat)."""
     if df.empty:
         return df
 
@@ -130,11 +131,11 @@ def run_institutional_backtest(
     df: pd.DataFrame,
     rsi_oversold: int = 38,
     rsi_overbought: int = 62,
-    sl_atr_mult: float = 2.5,  # Widened SL buffer to prevent premature stops
+    sl_atr_mult: float = 2.5,
     tgt_atr_mult: float = 3.5,
     num_lots: int = 1,
     lot_size: int = 75,
-    charges_per_trade: float = 60.0,  # ~ ₹60 Realistic roundtrip charges per lot
+    charges_per_trade: float = 60.0,
 ) -> pd.DataFrame:
     trades = []
     in_position = False
@@ -154,7 +155,6 @@ def run_institutional_backtest(
         current_date = row["Date"]
         current_time = row.name.time()
 
-        # Overtrading Control: Max 2 trades per day
         trades_today = daily_trade_count.get(current_date, 0)
 
         if in_position:
@@ -165,14 +165,12 @@ def run_institutional_backtest(
             exit_price = 0.0
             exit_reason = ""
 
-            # Force EOD Intraday Exit
             if current_time >= time(15, 15):
                 exit_triggered = True
                 exit_price = close
                 exit_reason = "EOD Squareoff"
 
             elif pos_type == "BUY":
-                # Trailing SL triggers ONLY after price moves 1.5x ATR in profit
                 if high >= entry_price + (current_atr * 1.5):
                     new_sl = high - (current_atr * 1.5)
                     trailing_sl = max(trailing_sl, new_sl)
@@ -224,7 +222,6 @@ def run_institutional_backtest(
                 )
                 in_position = False
 
-        # Entry Logic (Filtered for Max 2 Trades/Day & ATR > 10)
         if (
             not in_position
             and current_time < time(14, 45)
@@ -269,8 +266,6 @@ def generate_monthly_breakdown(
     )
 
     monthly_records = []
-
-    # Get unique last 12 months in reverse chronological order
     all_months = pd.period_range(
         end=pd.Timestamp.now().to_period("M"), periods=12, freq="M"
     )
