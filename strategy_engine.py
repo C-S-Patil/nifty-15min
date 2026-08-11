@@ -8,7 +8,6 @@ import yfinance as yf
 
 
 def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
-    """Filters data to retain only active trading sessions (09:15 - 15:30 IST + Samvat)."""
     if df.empty:
         return df
 
@@ -22,19 +21,17 @@ def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
     muhurat_mask = (times >= muhurat_start) & (times <= muhurat_end)
 
     filtered_df = df[standard_mask | muhurat_mask].copy()
-
-    # Safety: If filtering strips everything, return original dataframe
     return filtered_df if not filtered_df.empty else df
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", interval: str = "15m", period: str = "1mo"
+    ticker: str = "^NSEI", interval: str = "15m", period: str = "1y"
 ) -> pd.DataFrame:
     try:
         session = requests.Session()
         session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
         )
 
@@ -45,7 +42,7 @@ def fetch_and_prepare_data(
             df_15m = yf.download(
                 ticker,
                 interval=interval,
-                period="5d",
+                period="60d",
                 progress=False,
                 session=session,
             )
@@ -56,7 +53,6 @@ def fetch_and_prepare_data(
         if isinstance(df_15m.columns, pd.MultiIndex):
             df_15m.columns = df_15m.columns.get_level_values(0)
 
-        # 1. Timezone Normalization to IST
         ist = pytz.timezone("Asia/Kolkata")
         if df_15m.index.tzinfo is None:
             df_15m.index = df_15m.index.tz_localize("UTC").tz_convert(ist)
@@ -64,23 +60,20 @@ def fetch_and_prepare_data(
             df_15m.index = df_15m.index.tz_convert(ist)
 
         df_15m.dropna(subset=["Close"], inplace=True)
-
-        # 2. Filter Market Hours safely
         df_15m = filter_active_market_hours(df_15m)
 
-        # 3. Handle Volume Fallback for Index Tickers
         if df_15m["Volume"].sum() == 0 or df_15m["Volume"].isna().all():
             df_15m["Volume"] = (df_15m["High"] - df_15m["Low"]).replace(
                 0, 0.01
             )
 
-        # 4. Daily HTF Data for 50 EMA Filter
-        df_daily = dat.history(interval="1d", period="1y")
+        # Daily HTF Data
+        df_daily = dat.history(interval="1d", period="2y")
         if df_daily.empty:
             df_daily = yf.download(
                 ticker,
                 interval="1d",
-                period="1y",
+                period="2y",
                 progress=False,
                 session=session,
             )
@@ -98,7 +91,7 @@ def fetch_and_prepare_data(
         ).ema_indicator()
         df_daily["Date"] = df_daily.index.date
 
-        # 5. Calculate Indicators & VWAP
+        # Intraday VWAP & Indicators
         df_15m["Date"] = df_15m.index.date
         df_15m["Time"] = df_15m.index.time
         df_15m["TypicalPrice"] = (
@@ -117,8 +110,8 @@ def fetch_and_prepare_data(
             df_15m["High"], df_15m["Low"], df_15m["Close"], window=14
         ).average_true_range()
 
-        df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.2)
-        df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.2)
+        df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.5)
+        df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.5)
 
         daily_ema_map = df_daily.set_index("Date")["Daily_EMA50"].to_dict()
         df_15m["Daily_EMA50"] = df_15m["Date"].map(daily_ema_map)
@@ -137,22 +130,32 @@ def run_institutional_backtest(
     df: pd.DataFrame,
     rsi_oversold: int = 38,
     rsi_overbought: int = 62,
-    sl_atr_mult: float = 2.0,
-    tgt_atr_mult: float = 3.0,
+    sl_atr_mult: float = 2.5,  # Widened SL buffer to prevent premature stops
+    tgt_atr_mult: float = 3.5,
+    num_lots: int = 1,
     lot_size: int = 75,
-    flat_brokerage_per_trade: float = 40.0,
+    charges_per_trade: float = 60.0,  # ~ ₹60 Realistic roundtrip charges per lot
 ) -> pd.DataFrame:
     trades = []
     in_position = False
     pos_type = None
     entry_price = 0.0
+    initial_sl = 0.0
     trailing_sl = 0.0
     tgt_price = 0.0
     entry_time = None
+    daily_trade_count = {}
+
+    total_qty = num_lots * lot_size
+    total_charges = charges_per_trade * num_lots
 
     for i in range(1, len(df)):
         row = df.iloc[i]
+        current_date = row["Date"]
         current_time = row.name.time()
+
+        # Overtrading Control: Max 2 trades per day
+        trades_today = daily_trade_count.get(current_date, 0)
 
         if in_position:
             high, low, close = row["High"], row["Low"], row["Close"]
@@ -162,14 +165,17 @@ def run_institutional_backtest(
             exit_price = 0.0
             exit_reason = ""
 
+            # Force EOD Intraday Exit
             if current_time >= time(15, 15):
                 exit_triggered = True
                 exit_price = close
                 exit_reason = "EOD Squareoff"
 
             elif pos_type == "BUY":
-                new_sl = high - (current_atr * sl_atr_mult)
-                trailing_sl = max(trailing_sl, new_sl)
+                # Trailing SL triggers ONLY after price moves 1.5x ATR in profit
+                if high >= entry_price + (current_atr * 1.5):
+                    new_sl = high - (current_atr * 1.5)
+                    trailing_sl = max(trailing_sl, new_sl)
 
                 if low <= trailing_sl:
                     exit_triggered = True
@@ -181,8 +187,9 @@ def run_institutional_backtest(
                     exit_reason = "Target Hit"
 
             elif pos_type == "SELL":
-                new_sl = low + (current_atr * sl_atr_mult)
-                trailing_sl = min(trailing_sl, new_sl)
+                if low <= entry_price - (current_atr * 1.5):
+                    new_sl = low + (current_atr * 1.5)
+                    trailing_sl = min(trailing_sl, new_sl)
 
                 if high >= trailing_sl:
                     exit_triggered = True
@@ -195,12 +202,11 @@ def run_institutional_backtest(
 
             if exit_triggered:
                 gross_pnl = (
-                    (exit_price - entry_price) * lot_size
+                    (exit_price - entry_price) * total_qty
                     if pos_type == "BUY"
-                    else (entry_price - exit_price) * lot_size
+                    else (entry_price - exit_price) * total_qty
                 )
 
-                total_charges = flat_brokerage_per_trade
                 net_pnl = gross_pnl - total_charges
 
                 trades.append(
@@ -218,7 +224,13 @@ def run_institutional_backtest(
                 )
                 in_position = False
 
-        if not in_position and current_time < time(14, 45):
+        # Entry Logic (Filtered for Max 2 Trades/Day & ATR > 10)
+        if (
+            not in_position
+            and current_time < time(14, 45)
+            and trades_today < 2
+            and row["ATR"] >= 10.0
+        ):
             close = row["Close"]
 
             if close < row["VWAP_Lower"] and row["RSI"] < rsi_oversold:
@@ -226,16 +238,58 @@ def run_institutional_backtest(
                 pos_type = "BUY"
                 entry_price = close
                 entry_time = row.name
-                trailing_sl = entry_price - (row["ATR"] * sl_atr_mult)
+                initial_sl = entry_price - (row["ATR"] * sl_atr_mult)
+                trailing_sl = initial_sl
                 tgt_price = entry_price + (row["ATR"] * tgt_atr_mult)
+                daily_trade_count[current_date] = trades_today + 1
 
             elif close > row["VWAP_Upper"] and row["RSI"] > rsi_overbought:
                 in_position = True
                 pos_type = "SELL"
                 entry_price = close
                 entry_time = row.name
-                trailing_sl = entry_price + (row["ATR"] * sl_atr_mult)
+                initial_sl = entry_price + (row["ATR"] * sl_atr_mult)
+                trailing_sl = initial_sl
                 tgt_price = entry_price - (row["ATR"] * tgt_atr_mult)
+                daily_trade_count[current_date] = trades_today + 1
 
     return pd.DataFrame(trades)
-    
+
+
+def generate_12m_performance_summary(
+    trades_df: pd.DataFrame, capital: float
+) -> pd.DataFrame:
+    """Generates comprehensive 12-Month Performance Analytics Summary."""
+    if trades_df.empty:
+        return pd.DataFrame()
+
+    total_trades = len(trades_df)
+    profitable_trades = len(trades_df[trades_df["NetPnL"] > 0])
+    loss_trades = len(trades_df[trades_df["NetPnL"] <= 0])
+    win_rate = (
+        (profitable_trades / total_trades) * 100 if total_trades > 0 else 0.0
+    )
+
+    highest_profit = trades_df["NetPnL"].max()
+    highest_loss = trades_df["NetPnL"].min()
+
+    total_gross_pnl = trades_df["GrossPnL"].sum()
+    total_charges = trades_df["Charges"].sum()
+    total_net_pnl = trades_df["NetPnL"].sum()
+
+    roi_pct = (total_net_pnl / capital) * 100
+
+    summary = {
+        "Total Trades": [total_trades],
+        "Profitable Trades 🟢": [profitable_trades],
+        "Loss Trades 🔴": [loss_trades],
+        "Win Rate %": [f"{win_rate:.1f}%"],
+        "Highest Profit": [f"₹{highest_profit:,.2f}"],
+        "Highest Loss": [f"₹{highest_loss:,.2f}"],
+        "Total Charges": [f"₹{total_charges:,.2f}"],
+        "Gross PnL": [f"₹{total_gross_pnl:,.2f}"],
+        "Net PnL": [f"₹{total_net_pnl:,.2f}"],
+        "ROI % on Capital": [f"{roi_pct:+.2f}%"],
+    }
+
+    return pd.DataFrame(summary)
