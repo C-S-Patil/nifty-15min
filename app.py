@@ -1,4 +1,5 @@
 import datetime
+import plotly.graph_objects as go
 import pytz
 import streamlit as st
 from strategy_engine import fetch_and_prepare_data, run_institutional_backtest
@@ -11,33 +12,25 @@ st.set_page_config(
 
 st.title("⚡ Nifty 15-Min Quant Strategy & Execution Engine")
 
-# 1. Sidebar Config
+# Sidebar Config
 st.sidebar.header("⚙️ Strategy & Execution")
 symbol_map = {"Nifty 50": "^NSEI", "Bank Nifty": "^NSEBANK"}
 selected_symbol = st.sidebar.selectbox("Select Asset", list(symbol_map.keys()))
 ticker = symbol_map[selected_symbol]
-
-mode = st.sidebar.radio(
-    "Mode", ["Backtest & Dashboard 📊", "Paper Trade 📄", "Live Execution 🚀"]
-)
 
 rsi_oversold = st.sidebar.slider("RSI Oversold", 25, 45, 38)
 rsi_overbought = st.sidebar.slider("RSI Overbought", 55, 75, 62)
 sl_atr_mult = st.sidebar.slider("SL ATR Multiplier", 0.5, 3.0, 1.5)
 tgt_atr_mult = st.sidebar.slider("TGT ATR Multiplier", 1.5, 5.0, 2.5)
 
-# 2. Fetch Data with UI Logging
-st.subheader("🛠️ Execution Diagnostics")
-with st.expander("Show Execution Logs", expanded=True):
-    data = fetch_and_prepare_data(ticker=ticker, period="1mo")
+# Fetch Data
+data = fetch_and_prepare_data(ticker=ticker, period="1mo")
 
 if data.empty:
-    st.error(
-        f"❌ Data pipeline returned an empty DataFrame for {selected_symbol}. Check logs above."
-    )
+    st.error(f"❌ Data pipeline returned an empty DataFrame for {selected_symbol}.")
     st.stop()
 
-# 3. Main Dashboard
+# Main Metrics
 ist = pytz.timezone("Asia/Kolkata")
 latest = data.iloc[-1]
 last_time_ist = latest.name.strftime("%Y-%m-%d %H:%M IST")
@@ -53,9 +46,61 @@ c2.metric("VWAP", f"₹{latest['VWAP']:.2f}")
 c3.metric("RSI", f"{latest['RSI']:.1f}")
 c4.metric("Daily Trend", trend_state)
 
-st.line_chart(data[["Close", "VWAP", "VWAP_Upper", "VWAP_Lower"]].tail(100))
+# Plotly Interactive Chart with Custom Y-Axis Bounds (+10 / -10)
+recent_data = data.tail(100)
+min_y = float(recent_data["Low"].min()) - 10.0
+max_y = float(recent_data["High"].max()) + 10.0
 
-# 4. Backtest Analytics
+fig = go.Figure()
+fig.add_trace(
+    go.Scatter(
+        x=recent_data.index,
+        y=recent_data["Close"],
+        mode="lines",
+        name="Close",
+        line=dict(color="#1f77b4", width=2),
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=recent_data.index,
+        y=recent_data["VWAP"],
+        mode="lines",
+        name="VWAP",
+        line=dict(color="#ff7f0e", width=1.5),
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=recent_data.index,
+        y=recent_data["VWAP_Upper"],
+        mode="lines",
+        name="VWAP Upper",
+        line=dict(color="#d62728", width=1, dash="dash"),
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=recent_data.index,
+        y=recent_data["VWAP_Lower"],
+        mode="lines",
+        name="VWAP Lower",
+        line=dict(color="#2ca02c", width=1, dash="dash"),
+    )
+)
+
+fig.update_layout(
+    title=f"{selected_symbol} 15-Min Chart with VWAP Envelopes",
+    yaxis=dict(range=[min_y, max_y], title="Price (₹)"),
+    xaxis=dict(title="Time (IST)"),
+    margin=dict(l=20, r=20, t=40, b=20),
+    template="plotly_dark",
+    height=500,
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# Backtest Performance
 trades_df = run_institutional_backtest(
     data,
     rsi_oversold=rsi_oversold,
@@ -77,4 +122,6 @@ if not trades_df.empty:
     b3.metric("Net Profit/Loss", f"₹{net_pnl:,.2f}")
 
     st.dataframe(trades_df, use_container_width=True)
+else:
+    st.info("No trades triggered within the evaluated historical window.")
     
