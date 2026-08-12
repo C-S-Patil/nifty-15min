@@ -342,10 +342,12 @@ else:
 # ------------------------------------------------------------------
 # SECTION 3: 12-MONTH MONTHLY BREAKDOWN
 # ------------------------------------------------------------------
+
 st.markdown("---")
 st.subheader("🗓️ Last 12 Months Performance Breakdown")
 
-trades_12m = run_institutional_backtest(
+# 1. Run live 60-day backtest
+trades_60d = run_institutional_backtest(
     data,
     rsi_oversold=rsi_oversold,
     rsi_overbought=rsi_overbought,
@@ -353,21 +355,15 @@ trades_12m = run_institutional_backtest(
     lot_size=default_lot_size,
 )
 
+# 2. Merge with repo's saved historical trades
+trades_12m = get_combined_12m_trades(trades_60d)
+
 if not trades_12m.empty:
     monthly_table = generate_monthly_breakdown(trades_12m, capital)
 
-    st.dataframe(
-        monthly_table,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Actual Profit %": st.column_config.TextColumn(
-                "Actual Profit %",
-                help="Net Return percentage calculated on capital input",
-            )
-        },
-    )
+    st.dataframe(monthly_table, width="stretch", hide_index=True)
 
+    # Plot Monthly PnL Bar Chart
     trades_12m["YearMonth"] = pd.to_datetime(
         trades_12m["ExitTime"]
     ).dt.strftime("%b %Y")
@@ -398,5 +394,5 @@ if not trades_12m.empty:
     )
     st.plotly_chart(fig_bar, width="stretch")
 else:
-    st.info("Insufficient historical data to generate 12-month summary.")
+    st.info("No historical trade records found.")
     
