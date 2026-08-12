@@ -89,107 +89,78 @@ def filter_active_market_hours(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", interval: str = "15m", period: str = "1y"
+    ticker: str = "^NSEI", period: str = "60d", interval: str = "15m"
 ) -> pd.DataFrame:
+    """Fetches historical market data from Yahoo Finance and calculates VWAP Envelopes, RSI, and ATR.
+
+    Note: Intraday intervals (15m) are limited to a maximum period of 60 days by Yahoo Finance.
+    """
     try:
-        session = requests.Session()
-        session.headers.update(
-            {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
+        # Enforce max 60d period for intraday data to avoid Yahoo Finance API errors
+        if interval in ["1m", "2m", "5m", "15m", "30m", "60m"] and period not in [
+            "1d",
+            "5d",
+            "1mo",
+            "60d",
+        ]:
+            period = "60d"
+
+        df = yf.download(
+            tickers=ticker, period=period, interval=interval, progress=False
         )
 
-        dat = yf.Ticker(ticker, session=session)
-        df_15m = dat.history(interval=interval, period=period)
-
-        if df_15m.empty:
-            df_15m = yf.download(
-                ticker,
-                interval=interval,
-                period="60d",
-                progress=False,
-                session=session,
-            )
-
-        if df_15m.empty:
+        if df.empty:
             return pd.DataFrame()
 
-        if isinstance(df_15m.columns, pd.MultiIndex):
-            df_15m.columns = df_15m.columns.get_level_values(0)
+        # Handle MultiIndex columns if returned by yfinance
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
-        ist = pytz.timezone("Asia/Kolkata")
-        if df_15m.index.tzinfo is None:
-            df_15m.index = df_15m.index.tz_localize("UTC").tz_convert(ist)
+        # Convert index to Asia/Kolkata timezone
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
         else:
-            df_15m.index = df_15m.index.tz_convert(ist)
+            df.index = df.index.tz_convert("Asia/Kolkata")
 
-        df_15m.dropna(subset=["Close"], inplace=True)
-        df_15m = filter_active_market_hours(df_15m)
+        df["Date"] = df.index.date
 
-        if df_15m["Volume"].sum() == 0 or df_15m["Volume"].isna().all():
-            df_15m["Volume"] = (df_15m["High"] - df_15m["Low"]).replace(
-                0, 0.01
-            )
+        # Calculate Indicators
+        # 1. VWAP
+        df["Typical_Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
+        df["VP"] = df["Typical_Price"] * df["Volume"]
 
-        # Daily HTF Data
-        df_daily = dat.history(interval="1d", period="2y")
-        if df_daily.empty:
-            df_daily = yf.download(
-                ticker,
-                interval="1d",
-                period="2y",
-                progress=False,
-                session=session,
-            )
+        # Cumulative sums reset per day
+        df["Cum_VP"] = df.groupby("Date")["VP"].cumsum()
+        df["Cum_Vol"] = df.groupby("Date")["Volume"].cumsum()
+        df["VWAP"] = df["Cum_VP"] / df["Cum_Vol"]
 
-        if isinstance(df_daily.columns, pd.MultiIndex):
-            df_daily.columns = df_daily.columns.get_level_values(0)
+        # Standard Deviation for VWAP Bands
+        df["VWAP_Std"] = df.groupby("Date")["Typical_Price"].transform("std")
+        df["VWAP_Upper"] = df["VWAP"] + (1.5 * df["VWAP_Std"])
+        df["VWAP_Lower"] = df["VWAP"] - (1.5 * df["VWAP_Std"])
 
-        if df_daily.index.tzinfo is None:
-            df_daily.index = df_daily.index.tz_localize("UTC").tz_convert(ist)
-        else:
-            df_daily.index = df_daily.index.tz_convert(ist)
-
-        df_daily["Daily_EMA50"] = ta.trend.EMAIndicator(
-            df_daily["Close"], window=50
-        ).ema_indicator()
-        df_daily["Date"] = df_daily.index.date
-
-        # Intraday VWAP & Indicators
-        df_15m["Date"] = df_15m.index.date
-        df_15m["Time"] = df_15m.index.time
-        df_15m["TypicalPrice"] = (
-            df_15m["High"] + df_15m["Low"] + df_15m["Close"]
-        ) / 3
-        df_15m["TP_Vol"] = df_15m["TypicalPrice"] * df_15m["Volume"]
-
-        df_15m["Cum_TP_Vol"] = df_15m.groupby("Date")["TP_Vol"].cumsum()
-        df_15m["Cum_Vol"] = df_15m.groupby("Date")["Volume"].cumsum()
-        df_15m["VWAP"] = df_15m["Cum_TP_Vol"] / df_15m["Cum_Vol"]
-
-        df_15m["RSI"] = ta.momentum.RSIIndicator(
-            df_15m["Close"], window=14
+        # 2. RSI (14)
+        df["RSI"] = ta.momentum.RSIIndicator(
+            close=df["Close"], window=14
         ).rsi()
-        df_15m["ATR"] = ta.volatility.AverageTrueRange(
-            df_15m["High"], df_15m["Low"], df_15m["Close"], window=14
+
+        # 3. ATR (14)
+        df["ATR"] = ta.volatility.AverageTrueRange(
+            high=df["High"], low=df["Low"], close=df["Close"], window=14
         ).average_true_range()
 
-        df_15m["VWAP_Upper"] = df_15m["VWAP"] + (df_15m["ATR"] * 1.5)
-        df_15m["VWAP_Lower"] = df_15m["VWAP"] - (df_15m["ATR"] * 1.5)
+        # 4. Daily EMA 50 for Trend Filter
+        df["Daily_EMA50"] = ta.trend.EMAIndicator(
+            close=df["Close"], window=50
+        ).ema_indicator()
 
-        daily_ema_map = df_daily.set_index("Date")["Daily_EMA50"].to_dict()
-        df_15m["Daily_EMA50"] = df_15m["Date"].map(daily_ema_map)
-
-        df_15m.ffill(inplace=True)
-        df_15m.bfill(inplace=True)
-
-        return df_15m
+        return df.dropna()
 
     except Exception as e:
-        print(f"Data Processing Error: {e}")
+        print(f"Error fetching data: {e}")
         return pd.DataFrame()
 
-
+ 
 def run_institutional_backtest(
     df: pd.DataFrame,
     rsi_oversold: int = 38,
