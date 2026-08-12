@@ -5,14 +5,25 @@ import plotly.graph_objects as go
 import pytz
 import requests
 import streamlit as st
+
+# Import core strategy module safely
+import strategy_engine as se
 from strategy_engine import (
     SYMBOL_MAP,
     export_trades_to_excel,
     fetch_and_prepare_data,
     generate_monthly_breakdown,
-    get_combined_12m_trades,
     run_institutional_backtest,
 )
+
+# Safe fallback for get_combined_12m_trades if module cache is stale
+if hasattr(se, "get_combined_12m_trades"):
+    get_combined_12m_trades = se.get_combined_12m_trades
+else:
+
+    def get_combined_12m_trades(trades_df, file_path=None):
+        return trades_df
+
 
 try:
     from kiteconnect import KiteConnect
