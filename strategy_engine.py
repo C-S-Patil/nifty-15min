@@ -158,7 +158,6 @@ def run_institutional_backtest(
                     if pos_type == "BUY"
                     else (entry_price - exit_price) * total_qty
                 )
-
                 net_pnl = gross_pnl - total_charges
 
                 trades.append(
@@ -223,7 +222,6 @@ def generate_monthly_breakdown(
         return pd.DataFrame()
 
     df = trades_df.copy()
-
     exit_series = pd.to_datetime(df["ExitTime"])
     if exit_series.dt.tz is not None:
         exit_series = exit_series.dt.tz_localize(None)
