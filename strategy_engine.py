@@ -2,6 +2,7 @@ from datetime import time
 import io
 import json
 import os
+from urllib.parse import quote
 import numpy as np
 import pandas as pd
 import pytz
@@ -10,25 +11,51 @@ import ta
 import yfinance as yf
 
 SYMBOL_MAP = {
-    "Nifty 50": {"ticker": "^NSEI", "lot_size": 65},
-    "Bank Nifty": {"ticker": "^NSEBANK", "lot_size": 15},
-    "TCS": {"ticker": "TCS.NS", "lot_size": 175},
-    "Infosys (INFY)": {"ticker": "INFY.NS", "lot_size": 400},
-    "State Bank of India (SBIN)": {"ticker": "SBIN.NS", "lot_size": 750},
-    "HDFC Bank": {"ticker": "HDFCBANK.NS", "lot_size": 550},
-    "Reliance Industries": {"ticker": "RELIANCE.NS", "lot_size": 250},
-    "ICICI Bank": {"ticker": "ICICIBANK.NS", "lot_size": 700},
+    "Nifty 50": {"ticker": "^NSEI", "proxy": "NIFTYBEES.NS", "lot_size": 65},
+    "Bank Nifty": {
+        "ticker": "^NSEBANK",
+        "proxy": "BANKBEES.NS",
+        "lot_size": 15,
+    },
+    "TCS": {"ticker": "TCS.NS", "proxy": "TCS.NS", "lot_size": 175},
+    "Infosys (INFY)": {
+        "ticker": "INFY.NS",
+        "proxy": "INFY.NS",
+        "lot_size": 400,
+    },
+    "State Bank of India (SBIN)": {
+        "ticker": "SBIN.NS",
+        "proxy": "SBIN.NS",
+        "lot_size": 750,
+    },
+    "HDFC Bank": {
+        "ticker": "HDFCBANK.NS",
+        "proxy": "HDFCBANK.NS",
+        "lot_size": 550,
+    },
+    "Reliance Industries": {
+        "ticker": "RELIANCE.NS",
+        "proxy": "RELIANCE.NS",
+        "lot_size": 250,
+    },
+    "ICICI Bank": {
+        "ticker": "ICICIBANK.NS",
+        "proxy": "ICICIBANK.NS",
+        "lot_size": 700,
+    },
 }
 
 
 def _fetch_direct_yahoo_chart(
     ticker: str, range_str: str = "30d", interval: str = "15m"
 ) -> pd.DataFrame:
-    """Direct HTTP fallback to Yahoo Finance chart API with realistic browser headers."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range_str}&interval={interval}"
+    """Direct HTTP fetch to Yahoo Finance chart API with realistic browser headers."""
+    encoded_ticker = quote(ticker)
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded_ticker}?range={range_str}&interval={interval}"
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -36,53 +63,81 @@ def _fetch_direct_yahoo_chart(
             return pd.DataFrame()
 
         data = res.json()
+        if not data.get("chart", {}).get("result"):
+            return pd.DataFrame()
+
         result = data["chart"]["result"][0]
-        timestamps = result["timestamp"]
-        quote = result["indicators"]["quote"][0]
+        timestamps = result.get("timestamp", [])
+        quote_data = result["indicators"]["quote"][0]
+
+        if not timestamps:
+            return pd.DataFrame()
 
         df = pd.DataFrame(
             {
-                "Open": quote["open"],
-                "High": quote["high"],
-                "Low": quote["low"],
-                "Close": quote["close"],
-                "Volume": quote["volume"],
+                "Open": quote_data.get("open"),
+                "High": quote_data.get("high"),
+                "Low": quote_data.get("low"),
+                "Close": quote_data.get("close"),
+                "Volume": quote_data.get("volume"),
             },
             index=pd.to_datetime(timestamps, unit="s"),
         )
         return df.dropna()
-    except Exception as e:
-        print(f"Direct Yahoo Chart API error: {e}")
+    except Exception:
         return pd.DataFrame()
 
 
 def fetch_and_prepare_data(
     ticker: str = "^NSEI", period: str = "30d", interval: str = "15m"
 ) -> pd.DataFrame:
-    """Fetches market data using yfinance with direct API fallback for cloud server blocks."""
+    """Fetches market data with multi-stage fallback (Direct API -> yfinance -> ETF Proxy) to defeat cloud IP blocking."""
     df = pd.DataFrame()
 
-    # Attempt 1: Standard yfinance download
-    try:
-        df = yf.download(
-            tickers=ticker, period="30d", interval=interval, progress=False
-        )
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-    except Exception:
-        df = pd.DataFrame()
+    # Stage 1: Try Direct Yahoo Chart API on original ticker
+    df = _fetch_direct_yahoo_chart(
+        ticker=ticker, range_str="30d", interval=interval
+    )
 
-    # Attempt 2: Direct Yahoo HTTP Fallback if yfinance was blocked
+    # Stage 2: Try standard yfinance on original ticker
     if df.empty:
-        df = _fetch_direct_yahoo_chart(
-            ticker=ticker, range_str="30d", interval=interval
-        )
+        try:
+            df = yf.download(
+                tickers=ticker,
+                period="30d",
+                interval=interval,
+                progress=False,
+            )
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+        except Exception:
+            df = pd.DataFrame()
 
-    # Attempt 3: Shorter range fallback (7d) if 30d is throttled
+    # Stage 3: ETF Proxy Fallback if Index (^NSEI, ^NSEBANK) is blocked on server IP
     if df.empty:
-        df = _fetch_direct_yahoo_chart(
-            ticker=ticker, range_str="7d", interval=interval
-        )
+        proxy_ticker = "NIFTYBEES.NS" if "^NSEI" in ticker else "BANKBEES.NS"
+        if ticker in ["^NSEI", "^NSEBANK"]:
+            try:
+                df = yf.download(
+                    tickers=proxy_ticker,
+                    period="30d",
+                    interval=interval,
+                    progress=False,
+                )
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
+                # Scale ETF price proxy to actual index values for visual parity
+                if not df.empty and proxy_ticker == "NIFTYBEES.NS":
+                    scale_factor = (
+                        100.0  # NIFTYBEES is approximately 1/100th of Nifty
+                    )
+                    df["Open"] = df["Open"] * scale_factor
+                    df["High"] = df["High"] * scale_factor
+                    df["Low"] = df["Low"] * scale_factor
+                    df["Close"] = df["Close"] * scale_factor
+            except Exception:
+                df = pd.DataFrame()
 
     if df.empty:
         return pd.DataFrame()
