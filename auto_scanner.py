@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from strategy_engine import SYMBOL_MAP, fetch_and_prepare_data
 
@@ -32,10 +33,17 @@ def run_scanner():
     ticker = SYMBOL_MAP["Nifty 50"]["ticker"]
     lot_size = SYMBOL_MAP["Nifty 50"]["lot_size"]
 
-    # Fetch latest 60d 15m data
-    df = fetch_and_prepare_data(ticker=ticker, period="60d", interval="15m")
-    if df.empty:
-        print("❌ Could not fetch market data.")
+    df = None
+    # Retry loop with progressive fallbacks to handle cloud runner rate-limits
+    for period in ["59d", "30d", "5d"]:
+        df = fetch_and_prepare_data(ticker=ticker, period=period, interval="15m")
+        if not df.empty:
+            print(f"✅ Successfully fetched market data using period='{period}'")
+            break
+        time.sleep(2)
+
+    if df is None or df.empty:
+        print("❌ Could not fetch market data after retries.")
         return
 
     latest = df.iloc[-1]
@@ -71,9 +79,9 @@ def run_scanner():
         send_telegram_alert(alert_msg)
         print(f"✅ Automated alert dispatched for {signal}!")
     else:
-        print("⚪ No active signal detected on current candle.")
+        print(f"⚪ No active signal on current candle ({latest.name.strftime('%H:%M IST')}). Status: HOLD")
 
 
 if __name__ == "__main__":
     run_scanner()
-
+    
