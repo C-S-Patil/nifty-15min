@@ -6,6 +6,8 @@ import pytz
 import requests
 import ta
 import yfinance as yf
+import json
+import os
 
 SYMBOL_MAP = {
     "Nifty 50": {"ticker": "^NSEI", "lot_size": 65},  # Updated to 65
@@ -18,6 +20,83 @@ SYMBOL_MAP = {
     "ICICI Bank": {"ticker": "ICICIBANK.NS", "lot_size": 700},
 }
 
+
+def load_historical_trades(
+    file_path: str = "data/historical_trades.json",
+) -> pd.DataFrame:
+    """Loads historical trade logs saved in the local repository."""
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r") as f:
+                data = json.load(f)
+            if data:
+                df = pd.DataFrame(data)
+                df["EntryTime"] = pd.to_datetime(df["EntryTime"])
+                df["ExitTime"] = pd.to_datetime(df["ExitTime"])
+                return df
+        except Exception as e:
+            print(f"Error loading historical trades JSON: {e}")
+
+    return pd.DataFrame()
+
+
+def save_trade_to_history(
+    trade_dict: dict, file_path: str = "data/historical_trades.json"
+):
+    """Appends a newly executed trade to the local repository JSON file."""
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    existing_trades = []
+
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r") as f:
+                existing_trades = json.load(f)
+        except Exception:
+            existing_trades = []
+
+    # Ensure timestamps are string formatted for JSON serialization
+    trade_copy = trade_dict.copy()
+    if isinstance(trade_copy.get("EntryTime"), pd.Timestamp):
+        trade_copy["EntryTime"] = trade_copy["EntryTime"].strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    if isinstance(trade_copy.get("ExitTime"), pd.Timestamp):
+        trade_copy["ExitTime"] = trade_copy["ExitTime"].strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    existing_trades.append(trade_copy)
+
+    with open(file_path, "w") as f:
+        json.dump(existing_trades, f, indent=2)
+
+
+def get_combined_12m_trades(
+    live_60d_trades: pd.DataFrame,
+    file_path: str = "data/historical_trades.json",
+) -> pd.DataFrame:
+    """Merges saved repo trades with recent 60-day live backtest trades, removing duplicates."""
+    saved_df = load_historical_trades(file_path)
+
+    if saved_df.empty:
+        return live_60d_trades
+
+    if live_60d_trades.empty:
+        return saved_df
+
+    # Combine both DataFrames
+    combined = pd.concat([saved_df, live_60d_trades], ignore_index=True)
+
+    # Remove duplicate trades based on EntryTime and Type
+    combined["EntryStr"] = combined["EntryTime"].astype(str)
+    combined = combined.drop_duplicates(
+        subset=["EntryStr", "Type"]
+    ).drop(columns=["EntryStr"])
+
+    # Sort chronologically
+    combined = combined.sort_values(by="ExitTime").reset_index(drop=True)
+    return combined
+    
 
 def run_institutional_backtest(
     df: pd.DataFrame,
