@@ -5,6 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 import pytz
+import requests
 import ta
 import yfinance as yf
 
@@ -20,81 +21,106 @@ SYMBOL_MAP = {
 }
 
 
-def fetch_and_prepare_data(
-    ticker: str = "^NSEI", period: str = "59d", interval: str = "15m"
+def _fetch_direct_yahoo_chart(
+    ticker: str, range_str: str = "30d", interval: str = "15m"
 ) -> pd.DataFrame:
-    """Fetches historical market data from Yahoo Finance with fallback retries to handle rate limits and 60-day bounds cleanly."""
+    """Direct HTTP fallback to Yahoo Finance chart API with realistic browser headers."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range_str}&interval={interval}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    }
     try:
-        # Enforce maximum 59d to stay safely under Yahoo Finance's strict 60-day limit
-        if interval in ["1m", "2m", "5m", "15m", "30m", "60m"]:
-            if period not in ["1d", "5d", "1mo", "30d", "59d"]:
-                period = "59d"
-
-        df = yf.download(
-            tickers=ticker, period=period, interval=interval, progress=False
-        )
-
-        # Fallback to 30d if Yahoo Finance rate-limits or fails the 59d fetch
-        if df.empty and period == "59d":
-            df = yf.download(
-                tickers=ticker, period="30d", interval=interval, progress=False
-            )
-
-        if df.empty:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code != 200:
             return pd.DataFrame()
 
-        # Handle MultiIndex columns if returned by yfinance
+        data = res.json()
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+
+        df = pd.DataFrame(
+            {
+                "Open": quote["open"],
+                "High": quote["high"],
+                "Low": quote["low"],
+                "Close": quote["close"],
+                "Volume": quote["volume"],
+            },
+            index=pd.to_datetime(timestamps, unit="s"),
+        )
+        return df.dropna()
+    except Exception as e:
+        print(f"Direct Yahoo Chart API error: {e}")
+        return pd.DataFrame()
+
+
+def fetch_and_prepare_data(
+    ticker: str = "^NSEI", period: str = "30d", interval: str = "15m"
+) -> pd.DataFrame:
+    """Fetches market data using yfinance with direct API fallback for cloud server blocks."""
+    df = pd.DataFrame()
+
+    # Attempt 1: Standard yfinance download
+    try:
+        df = yf.download(
+            tickers=ticker, period="30d", interval=interval, progress=False
+        )
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+    except Exception:
+        df = pd.DataFrame()
 
-        # Convert index to Asia/Kolkata timezone
-        if df.index.tz is None:
-            df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
-        else:
-            df.index = df.index.tz_convert("Asia/Kolkata")
+    # Attempt 2: Direct Yahoo HTTP Fallback if yfinance was blocked
+    if df.empty:
+        df = _fetch_direct_yahoo_chart(
+            ticker=ticker, range_str="30d", interval=interval
+        )
 
-        df["Date"] = df.index.date
+    # Attempt 3: Shorter range fallback (7d) if 30d is throttled
+    if df.empty:
+        df = _fetch_direct_yahoo_chart(
+            ticker=ticker, range_str="7d", interval=interval
+        )
 
-        # Calculate Indicators
-        # 1. VWAP
-        df["Typical_Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
-        df["VP"] = df["Typical_Price"] * df["Volume"]
-
-        df["Cum_VP"] = df.groupby("Date")["VP"].cumsum()
-        df["Cum_Vol"] = df.groupby("Date")["Volume"].cumsum()
-        df["VWAP"] = df["Cum_VP"] / df["Cum_Vol"]
-
-        # Standard Deviation for VWAP Bands
-        df["VWAP_Std"] = df.groupby("Date")["Typical_Price"].transform("std")
-        df["VWAP_Upper"] = df["VWAP"] + (1.5 * df["VWAP_Std"])
-        df["VWAP_Lower"] = df["VWAP"] - (1.5 * df["VWAP_Std"])
-
-        # 2. RSI (14)
-        df["RSI"] = ta.momentum.RSIIndicator(
-            close=df["Close"], window=14
-        ).rsi()
-
-        # 3. ATR (14)
-        df["ATR"] = ta.volatility.AverageTrueRange(
-            high=df["High"], low=df["Low"], close=df["Close"], window=14
-        ).average_true_range()
-
-        # 4. Daily EMA 50 for Trend Filter
-        df["Daily_EMA50"] = ta.trend.EMAIndicator(
-            close=df["Close"], window=50
-        ).ema_indicator()
-
-        # 5. ADX (14)
-        df["ADX"] = ta.trend.ADXIndicator(
-            df["High"], df["Low"], df["Close"], window=14
-        ).adx()
-
-        return df.dropna()
-
-    except Exception as e:
-        print(f"Error fetching data: {e}")
+    if df.empty:
         return pd.DataFrame()
-        
+
+    # Timezone conversion to IST
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
+    else:
+        df.index = df.index.tz_convert("Asia/Kolkata")
+
+    df["Date"] = df.index.date
+
+    # Indicators
+    df["Typical_Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
+    df["VP"] = df["Typical_Price"] * df["Volume"]
+
+    df["Cum_VP"] = df.groupby("Date")["VP"].cumsum()
+    df["Cum_Vol"] = df.groupby("Date")["Volume"].cumsum()
+    df["VWAP"] = df["Cum_VP"] / df["Cum_Vol"]
+
+    df["VWAP_Std"] = df.groupby("Date")["Typical_Price"].transform("std")
+    df["VWAP_Upper"] = df["VWAP"] + (1.5 * df["VWAP_Std"])
+    df["VWAP_Lower"] = df["VWAP"] - (1.5 * df["VWAP_Std"])
+
+    df["RSI"] = ta.momentum.RSIIndicator(
+        close=df["Close"], window=14
+    ).rsi()
+    df["ATR"] = ta.volatility.AverageTrueRange(
+        high=df["High"], low=df["Low"], close=df["Close"], window=14
+    ).average_true_range()
+    df["Daily_EMA50"] = ta.trend.EMAIndicator(
+        close=df["Close"], window=50
+    ).ema_indicator()
+    df["ADX"] = ta.trend.ADXIndicator(
+        df["High"], df["Low"], df["Close"], window=14
+    ).adx()
+
+    return df.dropna()
 
 
 def run_institutional_backtest(
