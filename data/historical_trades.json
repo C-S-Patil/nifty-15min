@@ -1,0 +1,25 @@
+[
+  {
+    "Type": "BUY",
+    "EntryTime": "2025-09-15 10:15:00",
+    "ExitTime": "2025-09-15 14:30:00",
+    "EntryPrice": 24850.0,
+    "ExitPrice": 25020.0,
+    "GrossPnL": 11050.0,
+    "Charges": 60.0,
+    "NetPnL": 10990.0,
+    "Reason": "Target Hit"
+  },
+  {
+    "Type": "SELL",
+    "EntryTime": "2025-10-08 11:30:00",
+    "ExitTime": "2025-10-08 15:15:00",
+    "EntryPrice": 25100.0,
+    "ExitPrice": 24950.0,
+    "GrossPnL": 9750.0,
+    "Charges": 60.0,
+    "NetPnL": 9690.0,
+    "Reason": "Target Hit"
+  }
+]
+
