@@ -21,29 +21,33 @@ SYMBOL_MAP = {
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", period: str = "60d", interval: str = "15m"
+    ticker: str = "^NSEI", period: str = "59d", interval: str = "15m"
 ) -> pd.DataFrame:
+    """Fetches historical market data from Yahoo Finance with fallback retries to handle rate limits and 60-day bounds cleanly."""
     try:
-        if interval in [
-            "1m",
-            "2m",
-            "5m",
-            "15m",
-            "30m",
-            "60m",
-        ] and period not in ["1d", "5d", "1mo", "60d"]:
-            period = "60d"
+        # Enforce maximum 59d to stay safely under Yahoo Finance's strict 60-day limit
+        if interval in ["1m", "2m", "5m", "15m", "30m", "60m"]:
+            if period not in ["1d", "5d", "1mo", "30d", "59d"]:
+                period = "59d"
 
         df = yf.download(
             tickers=ticker, period=period, interval=interval, progress=False
         )
 
+        # Fallback to 30d if Yahoo Finance rate-limits or fails the 59d fetch
+        if df.empty and period == "59d":
+            df = yf.download(
+                tickers=ticker, period="30d", interval=interval, progress=False
+            )
+
         if df.empty:
             return pd.DataFrame()
 
+        # Handle MultiIndex columns if returned by yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
+        # Convert index to Asia/Kolkata timezone
         if df.index.tz is None:
             df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
         else:
@@ -51,6 +55,8 @@ def fetch_and_prepare_data(
 
         df["Date"] = df.index.date
 
+        # Calculate Indicators
+        # 1. VWAP
         df["Typical_Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
         df["VP"] = df["Typical_Price"] * df["Volume"]
 
@@ -58,27 +64,37 @@ def fetch_and_prepare_data(
         df["Cum_Vol"] = df.groupby("Date")["Volume"].cumsum()
         df["VWAP"] = df["Cum_VP"] / df["Cum_Vol"]
 
+        # Standard Deviation for VWAP Bands
         df["VWAP_Std"] = df.groupby("Date")["Typical_Price"].transform("std")
         df["VWAP_Upper"] = df["VWAP"] + (1.5 * df["VWAP_Std"])
         df["VWAP_Lower"] = df["VWAP"] - (1.5 * df["VWAP_Std"])
 
+        # 2. RSI (14)
         df["RSI"] = ta.momentum.RSIIndicator(
             close=df["Close"], window=14
         ).rsi()
+
+        # 3. ATR (14)
         df["ATR"] = ta.volatility.AverageTrueRange(
             high=df["High"], low=df["Low"], close=df["Close"], window=14
         ).average_true_range()
+
+        # 4. Daily EMA 50 for Trend Filter
         df["Daily_EMA50"] = ta.trend.EMAIndicator(
             close=df["Close"], window=50
         ).ema_indicator()
+
+        # 5. ADX (14)
         df["ADX"] = ta.trend.ADXIndicator(
             df["High"], df["Low"], df["Close"], window=14
         ).adx()
 
         return df.dropna()
+
     except Exception as e:
         print(f"Error fetching data: {e}")
         return pd.DataFrame()
+        
 
 
 def run_institutional_backtest(
