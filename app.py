@@ -1,4 +1,5 @@
 from datetime import time
+import io
 import os
 import pandas as pd
 import plotly.graph_objects as go
@@ -156,17 +157,19 @@ st.sidebar.header("⚙️ Strategy Parameters")
 rsi_oversold = st.sidebar.slider("RSI Oversold Filter", 25, 45, 38)
 rsi_overbought = st.sidebar.slider("RSI Overbought Filter", 55, 75, 62)
 
-# Load Historical Market Data
-data = fetch_and_prepare_data(ticker=ticker, period="1y")
+# Load Historical Market Data (Limited to max 60d for 15m intraday data)
+data = fetch_and_prepare_data(ticker=ticker, period="60d", interval="15m")
 
 if data.empty:
-    st.error(f"❌ Failed to fetch market data for {selected_symbol_name}.")
+    st.error(
+        f"❌ Failed to fetch market data for {selected_symbol_name}. Data range might exceed 60-day intraday limit."
+    )
     st.stop()
 
 one_month_data = data.tail(22 * 25)
 
 # ------------------------------------------------------------------
-# SECTION 1: OPEN TRADES & LIVE CHART (FIRST)
+# SECTION 1: OPEN TRADES & LIVE CHART
 # ------------------------------------------------------------------
 st.subheader(f"📌 Active Market Monitor — {selected_symbol_name}")
 
@@ -278,10 +281,10 @@ fig.update_layout(
     template="plotly_dark",
     height=420,
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # ------------------------------------------------------------------
-# SECTION 2: 1-MONTH PERFORMANCE ANALYTICS & EXCEL DOWNLOAD (SECOND)
+# SECTION 2: 1-MONTH PERFORMANCE ANALYTICS & EXCEL DOWNLOAD
 # ------------------------------------------------------------------
 st.markdown("---")
 st.subheader("📊 Current Month Executed Trades & Performance")
@@ -324,7 +327,7 @@ if not trades_1m.empty:
 
     st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "Charges": st.column_config.NumberColumn(
                 "Charges (₹)",
@@ -337,7 +340,7 @@ else:
     st.info("No trades triggered during the current month period.")
 
 # ------------------------------------------------------------------
-# SECTION 3: 12-MONTH MONTHLY BREAKDOWN (THIRD)
+# SECTION 3: 12-MONTH MONTHLY BREAKDOWN
 # ------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🗓️ Last 12 Months Performance Breakdown")
@@ -355,7 +358,7 @@ if not trades_12m.empty:
 
     st.dataframe(
         monthly_table,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Actual Profit %": st.column_config.TextColumn(
@@ -393,7 +396,7 @@ if not trades_12m.empty:
         template="plotly_dark",
         height=380,
     )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(fig_bar, width="stretch")
 else:
     st.info("Insufficient historical data to generate 12-month summary.")
     
