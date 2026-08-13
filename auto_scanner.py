@@ -1,20 +1,43 @@
 import os
-import time
-import requests
-from strategy_engine import SYMBOL_MAP, fetch_and_prepare_data
+from datetime import time
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+import requests
+
+from strategy_engine import (
+    SYMBOL_MAP,
+    fetch_and_prepare_data,
+)
+
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    "",
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    "",
+)
+
+
+RSI_OVERSOLD = 38
+RSI_OVERBOUGHT = 62
+ADX_MAX = 32
 
 
 def send_telegram_alert(message: str) -> bool:
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram credentials missing.")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
     try:
-        res = requests.post(
+        response = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -23,65 +46,154 @@ def send_telegram_alert(message: str) -> bool:
             },
             timeout=10,
         )
-        return res.status_code == 200
-    except Exception as e:
-        print(f"❌ Telegram Exception: {e}")
+
+        if response.status_code != 200:
+            print(
+                f"❌ Telegram HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
+            return False
+
+        return True
+
+    except requests.RequestException as exc:
+        print(f"❌ Telegram Exception: {exc}")
         return False
 
 
 def run_scanner():
+
     ticker = SYMBOL_MAP["Nifty 50"]["ticker"]
     lot_size = SYMBOL_MAP["Nifty 50"]["lot_size"]
 
-    df = None
-    # Retry loop with progressive fallbacks to handle cloud runner rate-limits
-    for period in ["59d", "30d", "5d"]:
-        df = fetch_and_prepare_data(ticker=ticker, period=period, interval="15m")
-        if not df.empty:
-            print(f"✅ Successfully fetched market data using period='{period}'")
-            break
-        time.sleep(2)
+    print(
+        f"📡 Scanner starting for {ticker}"
+    )
 
-    if df is None or df.empty:
-        print("❌ Could not fetch market data after retries.")
+    # ONE provider call.
+    # fetch_and_prepare_data() now owns the fallback logic.
+    df = fetch_and_prepare_data(
+        ticker=ticker,
+        period="1mo",
+        interval="15m",
+    )
+
+    if df.empty:
+        print(
+            "🛑 MARKET DATA UNAVAILABLE. "
+            "No signal will be generated."
+        )
+        return
+
+    if len(df) < 3:
+        print(
+            "🛑 Insufficient market data. "
+            "No signal will be generated."
+        )
         return
 
     latest = df.iloc[-1]
-    prev = df.iloc[-2]
+    previous = df.iloc[-2]
 
-    # Evaluate Entry Conditions
-    rsi_oversold = 38
-    rsi_overbought = 62
+    required_columns = [
+        "Open",
+        "Close",
+        "VWAP_Lower",
+        "VWAP_Upper",
+        "RSI",
+        "ADX",
+    ]
+
+    missing = [
+        col
+        for col in required_columns
+        if col not in df.columns
+    ]
+
+    if missing:
+        print(
+            f"🛑 Missing strategy columns: {missing}"
+        )
+        return
+
+    current_time = latest.name.time()
+
+    # Never generate an entry after the entry cutoff.
+    if current_time >= time(14, 45):
+        print(
+            f"⏱️ Entry window closed: "
+            f"{latest.name.strftime('%H:%M IST')}"
+        )
+        return
+
+    # Exact established strategy.
+    buy_signal = (
+        previous["Close"]
+        < previous["VWAP_Lower"]
+        and latest["Close"]
+        > latest["Open"]
+        and latest["RSI"]
+        < RSI_OVERSOLD
+        and latest["ADX"]
+        < ADX_MAX
+    )
+
+    sell_signal = (
+        previous["Close"]
+        > previous["VWAP_Upper"]
+        and latest["Close"]
+        < latest["Open"]
+        and latest["RSI"]
+        > RSI_OVERBOUGHT
+        and latest["ADX"]
+        < ADX_MAX
+    )
+
     signal = None
 
-    if (
-        prev["Close"] < prev["VWAP_Lower"]
-        and latest["Close"] > latest["Open"]
-        and latest["RSI"] < rsi_oversold
-    ):
+    if buy_signal:
         signal = "BUY"
-    elif (
-        prev["Close"] > prev["VWAP_Upper"]
-        and latest["Close"] < latest["Open"]
-        and latest["RSI"] > rsi_overbought
-    ):
+
+    elif sell_signal:
         signal = "SELL"
 
-    if signal:
-        total_qty = 1 * lot_size
-        alert_msg = (
-            f"🚨 *AUTOMATED NIFTY {signal} SIGNAL DETECTED* ⚡\n\n"
-            f"📌 *Asset:* Nifty 50\n"
-            f"📈 *Signal Price:* ₹{latest['Close']:.2f}\n"
-            f"📦 *Quantity:* {total_qty} (1 Lot @ {lot_size}/lot)\n"
-            f"💡 *Trigger Reason:* RSI + VWAP Reversal Candle Close"
+    timestamp = latest.name.strftime(
+        "%Y-%m-%d %H:%M IST"
+    )
+
+    if not signal:
+        print(
+            f"⚪ HOLD | {timestamp} | "
+            f"RSI={latest['RSI']:.2f} "
+            f"ADX={latest['ADX']:.2f}"
         )
-        send_telegram_alert(alert_msg)
-        print(f"✅ Automated alert dispatched for {signal}!")
+        return
+
+    total_qty = lot_size
+
+    alert_msg = (
+        f"🚨 *AUTOMATED NIFTY "
+        f"{signal} SIGNAL* ⚡\n\n"
+        f"📌 *Asset:* Nifty 50\n"
+        f"🕐 *Candle:* {timestamp}\n"
+        f"📈 *Price:* ₹{latest['Close']:.2f}\n"
+        f"📦 *Quantity:* {total_qty}\n"
+        f"📊 *RSI:* {latest['RSI']:.2f}\n"
+        f"📉 *ADX:* {latest['ADX']:.2f}\n"
+        f"💡 *Reason:* VWAP reversal + "
+        f"RSI + ADX confirmation"
+    )
+
+    if send_telegram_alert(alert_msg):
+        print(
+            f"✅ Automated {signal} alert dispatched."
+        )
     else:
-        print(f"⚪ No active signal on current candle ({latest.name.strftime('%H:%M IST')}). Status: HOLD")
+        print(
+            f"⚠️ {signal} detected but Telegram "
+            f"delivery failed."
+        )
 
 
 if __name__ == "__main__":
     run_scanner()
-    
