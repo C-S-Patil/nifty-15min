@@ -9,6 +9,9 @@ import pytz
 import requests
 import ta
 import yfinance as yf
+import logging
+import time as time_module
+
 
 SYMBOL_MAP = {
     "Nifty 50": {"ticker": "^NSEI", "proxy": "NIFTYBEES.NS", "lot_size": 65},
@@ -46,129 +49,488 @@ SYMBOL_MAP = {
 }
 
 
-def _fetch_direct_yahoo_chart(
-    ticker: str, range_str: str = "1mo", interval: str = "15m"
+LOGGER = logging.getLogger("quant_engine")
+
+IST = pytz.timezone("Asia/Kolkata")
+
+YAHOO_TIMEOUT = 10
+YAHOO_CACHE_TTL_SECONDS = 60
+YAHOO_COOLDOWN_SECONDS = 300
+
+# Process-local cache.
+# This dramatically reduces Streamlit rerun traffic.
+_DATA_CACHE = {}
+_YAHOO_RATE_LIMIT_UNTIL = 0.0
+
+
+def _cache_key(ticker: str, period: str, interval: str) -> tuple:
+    return ticker, period, interval
+
+
+def _get_cached_data(ticker: str, period: str, interval: str):
+    key = _cache_key(ticker, period, interval)
+    item = _DATA_CACHE.get(key)
+
+    if not item:
+        return None
+
+    timestamp, df = item
+
+    if time_module.time() - timestamp > YAHOO_CACHE_TTL_SECONDS:
+        _DATA_CACHE.pop(key, None)
+        return None
+
+    return df.copy()
+
+
+def _set_cached_data(ticker: str, period: str, interval: str, df: pd.DataFrame):
+    _DATA_CACHE[_cache_key(ticker, period, interval)] = (
+        time_module.time(),
+        df.copy(),
+    )
+
+
+def _is_yahoo_rate_limited() -> bool:
+    return time_module.time() < _YAHOO_RATE_LIMIT_UNTIL
+
+
+def _mark_yahoo_rate_limited():
+    global _YAHOO_RATE_LIMIT_UNTIL
+    _YAHOO_RATE_LIMIT_UNTIL = (
+        time_module.time() + YAHOO_COOLDOWN_SECONDS
+    )
+
+
+def _normalise_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    required = ["Open", "High", "Low", "Close"]
+
+    if not all(col in df.columns for col in required):
+        return pd.DataFrame()
+
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
+
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
+    return df
+
+
+def _fetch_yfinance(
+    ticker: str,
+    period: str,
+    interval: str,
 ) -> pd.DataFrame:
-    """Direct HTTP fetch to Yahoo Finance chart API with realistic headers."""
-    encoded_ticker = quote(ticker)
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded_ticker}?range={range_str}&interval={interval}"
+
+    if _is_yahoo_rate_limited():
+        LOGGER.warning(
+            "[DATA] Yahoo cooldown active; skipping yfinance for %s",
+            ticker,
+        )
+        return pd.DataFrame()
+
+    try:
+        df = yf.download(
+            tickers=ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+
+        df = _normalise_ohlcv(df)
+
+        if not df.empty:
+            LOGGER.info(
+                "[DATA] yfinance success: %s rows=%d",
+                ticker,
+                len(df),
+            )
+            return df
+
+        LOGGER.warning(
+            "[DATA] yfinance returned empty data: %s",
+            ticker,
+        )
+
+    except Exception as exc:
+        error_name = type(exc).__name__
+        error_text = str(exc)
+
+        if (
+            "RateLimit" in error_name
+            or "Too Many Requests" in error_text
+            or "429" in error_text
+        ):
+            _mark_yahoo_rate_limited()
+
+            LOGGER.error(
+                "[DATA] Yahoo RATE LIMITED: %s. "
+                "Yahoo requests disabled for %ss.",
+                ticker,
+                YAHOO_COOLDOWN_SECONDS,
+            )
+        else:
+            LOGGER.error(
+                "[DATA] yfinance failure for %s: %s: %s",
+                ticker,
+                error_name,
+                error_text,
+            )
+
+    return pd.DataFrame()
+
+
+def _fetch_direct_yahoo_chart(
+    ticker: str,
+    range_str: str = "1mo",
+    interval: str = "15m",
+) -> pd.DataFrame:
+
+    if _is_yahoo_rate_limited():
+        LOGGER.warning(
+            "[DATA] Yahoo cooldown active; skipping direct API: %s",
+            ticker,
+        )
+        return pd.DataFrame()
+
+    encoded_ticker = quote(ticker, safe="")
+
+    hosts = [
+        "query1.finance.yahoo.com",
+        "query2.finance.yahoo.com",
+    ]
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "*/*",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Connection": "close",
     }
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code != 200:
-            return pd.DataFrame()
 
-        data = res.json()
-        if not data.get("chart", {}).get("result"):
-            return pd.DataFrame()
-
-        result = data["chart"]["result"][0]
-        timestamps = result.get("timestamp", [])
-        quote_data = result["indicators"]["quote"][0]
-
-        if not timestamps:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(
-            {
-                "Open": quote_data.get("open"),
-                "High": quote_data.get("high"),
-                "Low": quote_data.get("low"),
-                "Close": quote_data.get("close"),
-                "Volume": quote_data.get("volume"),
-            },
-            index=pd.to_datetime(timestamps, unit="s"),
+    for host in hosts:
+        url = (
+            f"https://{host}/v8/finance/chart/"
+            f"{encoded_ticker}"
+            f"?range={range_str}&interval={interval}"
+            f"&events=history"
         )
-        return df.dropna()
-    except Exception:
+
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=YAHOO_TIMEOUT,
+            )
+
+            if response.status_code == 429:
+                _mark_yahoo_rate_limited()
+
+                LOGGER.error(
+                    "[DATA] Yahoo HTTP 429 for %s via %s",
+                    ticker,
+                    host,
+                )
+
+                return pd.DataFrame()
+
+            if response.status_code != 200:
+                LOGGER.warning(
+                    "[DATA] Yahoo HTTP %s for %s via %s",
+                    response.status_code,
+                    ticker,
+                    host,
+                )
+                continue
+
+            payload = response.json()
+            result = payload.get("chart", {}).get("result")
+
+            if not result:
+                LOGGER.warning(
+                    "[DATA] Yahoo returned no chart result for %s",
+                    ticker,
+                )
+                continue
+
+            result = result[0]
+
+            timestamps = result.get("timestamp", [])
+            quote_data = (
+                result.get("indicators", {})
+                .get("quote", [{}])[0]
+            )
+
+            if not timestamps:
+                continue
+
+            df = pd.DataFrame(
+                {
+                    "Open": quote_data.get("open"),
+                    "High": quote_data.get("high"),
+                    "Low": quote_data.get("low"),
+                    "Close": quote_data.get("close"),
+                    "Volume": quote_data.get("volume"),
+                },
+                index=pd.to_datetime(
+                    timestamps,
+                    unit="s",
+                    utc=True,
+                ),
+            )
+
+            df = _normalise_ohlcv(df)
+
+            if not df.empty:
+                LOGGER.info(
+                    "[DATA] Direct Yahoo success: %s rows=%d",
+                    ticker,
+                    len(df),
+                )
+                return df
+
+        except requests.RequestException as exc:
+            LOGGER.warning(
+                "[DATA] Direct Yahoo network failure "
+                "%s via %s: %s",
+                ticker,
+                host,
+                exc,
+            )
+
+        except (ValueError, KeyError, TypeError) as exc:
+            LOGGER.warning(
+                "[DATA] Invalid Yahoo response "
+                "%s via %s: %s",
+                ticker,
+                host,
+                exc,
+            )
+
+    return pd.DataFrame()
+
+
+def _fetch_proxy(
+    ticker: str,
+    period: str,
+    interval: str,
+) -> pd.DataFrame:
+
+    config = next(
+        (
+            item
+            for item in SYMBOL_MAP.values()
+            if item["ticker"] == ticker
+        ),
+        None,
+    )
+
+    if not config:
         return pd.DataFrame()
+
+    proxy = config.get("proxy")
+
+    if not proxy or proxy == ticker:
+        return pd.DataFrame()
+
+    LOGGER.warning(
+        "[DATA] Attempting ETF proxy %s for %s",
+        proxy,
+        ticker,
+    )
+
+    # Only make the proxy request when the normal ticker
+    # failed. This prevents unnecessary Yahoo traffic.
+    df = _fetch_yfinance(
+        proxy,
+        period,
+        interval,
+    )
+
+    if df.empty:
+        return df
+
+    # NIFTYBEES is approximately 1/100th of NIFTY.
+    if ticker == "^NSEI" and proxy == "NIFTYBEES.NS":
+        for col in ["Open", "High", "Low", "Close"]:
+            df[col] *= 100.0
+
+    return df
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", period: str = "1mo", interval: str = "15m"
+    ticker: str = "^NSEI",
+    period: str = "1mo",
+    interval: str = "15m",
 ) -> pd.DataFrame:
-    """Fetches market data with fallback (yfinance 1mo -> Direct Yahoo API -> ETF Proxy) to ensure index data loads."""
-    df = pd.DataFrame()
 
-    # Stage 1: Standard yfinance with 1mo period (valid intraday range for indices)
-    try:
-        df = yf.download(
-            tickers=ticker, period="1mo", interval=interval, progress=False
+    """
+    Production market-data provider.
+
+    Provider order:
+
+        1. Process-local cache
+        2. yfinance
+        3. Direct Yahoo Chart API
+        4. ETF proxy for indices
+
+    IMPORTANT:
+    We intentionally do NOT retry the same Yahoo request repeatedly.
+    A Yahoo 429 activates a cooldown to prevent request storms.
+    """
+
+    cached = _get_cached_data(
+        ticker,
+        period,
+        interval,
+    )
+
+    if cached is not None and not cached.empty:
+        LOGGER.info(
+            "[DATA] Cache hit: %s rows=%d",
+            ticker,
+            len(cached),
         )
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-    except Exception:
-        df = pd.DataFrame()
+        return cached
 
-    # Stage 2: Direct Yahoo Endpoint Fallback
+    LOGGER.info(
+        "[DATA] Fetching %s period=%s interval=%s",
+        ticker,
+        period,
+        interval,
+    )
+
+    df = _fetch_yfinance(
+        ticker,
+        period,
+        interval,
+    )
+
     if df.empty:
         df = _fetch_direct_yahoo_chart(
-            ticker=ticker, range_str="1mo", interval=interval
+            ticker,
+            range_str=period,
+            interval=interval,
         )
 
-    # Stage 3: ETF Proxy Fallback (NIFTYBEES / BANKBEES) if index is blocked
-    if df.empty and ticker in ["^NSEI", "^NSEBANK"]:
-        proxy_ticker = "NIFTYBEES.NS" if ticker == "^NSEI" else "BANKBEES.NS"
-        try:
-            df = yf.download(
-                tickers=proxy_ticker,
-                period="1mo",
-                interval=interval,
-                progress=False,
-            )
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+    if df.empty and ticker in ("^NSEI", "^NSEBANK"):
+        df = _fetch_proxy(
+            ticker,
+            period,
+            interval,
+        )
 
-            if not df.empty and proxy_ticker == "NIFTYBEES.NS":
-                scale = 100.0
-                df["Open"] *= scale
-                df["High"] *= scale
-                df["Low"] *= scale
-                df["Close"] *= scale
-        except Exception:
-            df = pd.DataFrame()
+    if df.empty:
+        LOGGER.error(
+            "[DATA] MARKET DATA UNAVAILABLE: %s",
+            ticker,
+        )
+        return pd.DataFrame()
+
+    # Timezone -> IST
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+
+    df.index = df.index.tz_convert(IST)
+
+    # Remove duplicate timestamps.
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.sort_index()
+
+    df["Date"] = df.index.date
+
+    # VWAP
+    df["Typical_Price"] = (
+        df["High"] + df["Low"] + df["Close"]
+    ) / 3
+
+    df["VP"] = (
+        df["Typical_Price"] * df["Volume"]
+    )
+
+    df["Cum_VP"] = (
+        df.groupby("Date")["VP"]
+        .cumsum()
+    )
+
+    df["Cum_Vol"] = (
+        df.groupby("Date")["Volume"]
+        .cumsum()
+    )
+
+    df["VWAP"] = np.where(
+        df["Cum_Vol"] > 0,
+        df["Cum_VP"] / df["Cum_Vol"],
+        df["Typical_Price"],
+    )
+
+    df["VWAP_Std"] = (
+        df.groupby("Date")["Typical_Price"]
+        .transform("std")
+        .fillna(0)
+    )
+
+    df["VWAP_Upper"] = (
+        df["VWAP"] + 1.5 * df["VWAP_Std"]
+    )
+
+    df["VWAP_Lower"] = (
+        df["VWAP"] - 1.5 * df["VWAP_Std"]
+    )
+
+    df["RSI"] = ta.momentum.RSIIndicator(
+        close=df["Close"],
+        window=14,
+    ).rsi()
+
+    df["ATR"] = ta.volatility.AverageTrueRange(
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        window=14,
+    ).average_true_range()
+
+    df["Daily_EMA50"] = ta.trend.EMAIndicator(
+        close=df["Close"],
+        window=50,
+    ).ema_indicator()
+
+    df["ADX"] = ta.trend.ADXIndicator(
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        window=14,
+    ).adx()
+
+    df = df.dropna()
 
     if df.empty:
         return pd.DataFrame()
 
-    # Timezone conversion to IST
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
-    else:
-        df.index = df.index.tz_convert("Asia/Kolkata")
+    _set_cached_data(
+        ticker,
+        period,
+        interval,
+        df,
+    )
 
-    df["Date"] = df.index.date
-
-    # Indicators
-    df["Typical_Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["VP"] = df["Typical_Price"] * df["Volume"]
-
-    df["Cum_VP"] = df.groupby("Date")["VP"].cumsum()
-    df["Cum_Vol"] = df.groupby("Date")["Volume"].cumsum()
-    df["VWAP"] = df["Cum_VP"] / df["Cum_Vol"]
-
-    df["VWAP_Std"] = df.groupby("Date")["Typical_Price"].transform("std")
-    df["VWAP_Upper"] = df["VWAP"] + (1.5 * df["VWAP_Std"])
-    df["VWAP_Lower"] = df["VWAP"] - (1.5 * df["VWAP_Std"])
-
-    df["RSI"] = ta.momentum.RSIIndicator(
-        close=df["Close"], window=14
-    ).rsi()
-    df["ATR"] = ta.volatility.AverageTrueRange(
-        high=df["High"], low=df["Low"], close=df["Close"], window=14
-    ).average_true_range()
-    df["Daily_EMA50"] = ta.trend.EMAIndicator(
-        close=df["Close"], window=50
-    ).ema_indicator()
-    df["ADX"] = ta.trend.ADXIndicator(
-        df["High"], df["Low"], df["Close"], window=14
-    ).adx()
-
-    return df.dropna()
+    return df.copy()
 
 
 def run_institutional_backtest(
