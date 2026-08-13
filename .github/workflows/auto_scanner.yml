@@ -3,31 +3,34 @@ name: Automated 15-Min Signal Scanner
 on:
   schedule:
     # 09:15 IST = 03:45 UTC
-    - cron: '45 3 * * 1-5'
-
+    - cron: "45 3 * * 1-5"
     # 09:30 through 15:15 IST
-    - cron: '0,15,30,45 4-9 * * 1-5'
-
-    # 15:30 IST = 10:00 UTC
-    - cron: '0 10 * * 1-5'
-
+    - cron: "0,15,30,45 4-9 * * 1-5"
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: quant-15m-scanner
+  cancel-in-progress: false
 
 jobs:
   scan-and-alert:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 5
+    timeout-minutes: 8
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install Dependencies
         run: |
@@ -38,5 +41,19 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCAN_SYMBOLS: ${{ vars.SCAN_SYMBOLS }}
         run: |
           python auto_scanner.py
+
+      - name: Persist scanner state
+        run: |
+          if git diff --quiet -- data/scanner_state.json; then
+            echo "No scanner state changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/scanner_state.json
+          git commit -m "chore: persist scanner state [skip ci]"
+          git push
