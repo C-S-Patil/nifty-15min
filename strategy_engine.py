@@ -315,6 +315,35 @@ def prepare_research_data(raw_df):
     df.attrs["primary_data"] = True
     return df
 
+def research_dataset_diagnostics(raw_df, prepared_df):
+    """Return transparent diagnostics for an uploaded research dataset."""
+    raw_rows = int(len(raw_df)) if raw_df is not None else 0
+    prepared_rows = int(len(prepared_df)) if prepared_df is not None else 0
+    if prepared_df is None or prepared_df.empty:
+        return {
+            "raw_rows": raw_rows,
+            "usable_rows": 0,
+            "start": None,
+            "end": None,
+            "trading_days": 0,
+            "median_bars_per_day": 0.0,
+            "daily_ema_ready": False,
+        }
+    idx = prepared_df.index
+    days = pd.Series(idx.normalize()).drop_duplicates()
+    counts = pd.Series(1, index=idx).groupby(idx.normalize()).sum()
+    return {
+        "raw_rows": raw_rows,
+        "usable_rows": prepared_rows,
+        "start": idx.min(),
+        "end": idx.max(),
+        "trading_days": int(len(days)),
+        "median_bars_per_day": float(counts.median()) if not counts.empty else 0.0,
+        "daily_ema_ready": bool(prepared_df.get("Daily_EMA50", pd.Series(dtype=float)).notna().any())
+            if prepared_df is not None else False,
+    }
+
+
 def fetch_and_prepare_data(ticker="^NSEI", period="1mo", interval="15m"):
     key = _cache_key(ticker, period, interval)
     cached = _get_cached(_DATA_CACHE, key, YAHOO_INTRADAY_CACHE_TTL)
@@ -452,6 +481,10 @@ def _trade_stats(trades, capital):
         else:
             loss_streak = 0
     exits = pd.to_datetime(trades["ExitTime"], errors="coerce")
+    # PeriodArray cannot retain timezone metadata. Strip it explicitly here
+    # instead of letting pandas emit a warning during to_period().
+    if not exits.empty and getattr(exits.dt, "tz", None) is not None:
+        exits = exits.dt.tz_localize(None)
     months = exits.dt.to_period("M") if not exits.empty else pd.Series(dtype="period[M]")
     monthly = trades.assign(_month=months).groupby("_month")["NetPnL"].sum() if not trades.empty else pd.Series(dtype=float)
     return {

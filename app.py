@@ -24,6 +24,7 @@ from strategy_engine import (
     export_trades_to_excel,
     fetch_and_prepare_data,
     prepare_research_data,
+    research_dataset_diagnostics,
     run_institutional_backtest,
 )
 
@@ -588,6 +589,11 @@ with st.expander("🔍 Signal Diagnostics", expanded=False):
         columns=["Condition", "Status"],
     )
 
+    # Keep this column explicitly string-typed. Mixing booleans and labels such
+    # as BULLISH/BEARISH makes PyArrow infer an invalid boolean/object schema.
+    diagnostics["Condition"] = diagnostics["Condition"].astype("string")
+    diagnostics["Status"] = diagnostics["Status"].astype("string")
+
     st.dataframe(
         diagnostics,
         width="stretch",
@@ -938,10 +944,33 @@ if uploaded is not None:
                     "Check the CSV columns and timestamps."
                 )
             else:
+                research_diag = research_dataset_diagnostics(raw, research)
+
                 st.success(
-                    f"Research dataset loaded: "
-                    f"{len(research):,} usable 15-minute candles."
+                    f"Research dataset loaded: {len(research):,} usable 15-minute candles."
                 )
+
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("Raw CSV Rows", f"{research_diag['raw_rows']:,}")
+                d2.metric("Usable 15m Candles", f"{research_diag['usable_rows']:,}")
+                d3.metric("Trading Days", f"{research_diag['trading_days']:,}")
+                d4.metric("Median Candles / Day", f"{research_diag['median_bars_per_day']:.0f}")
+
+                if research_diag["start"] is not None:
+                    st.caption(
+                        f"Dataset range: {research_diag['start']} → {research_diag['end']}"
+                    )
+
+                if research_diag["raw_rows"] > 500 and research_diag["usable_rows"] < 200:
+                    st.warning(
+                        "The CSV contains many rows but very few usable 15-minute candles. "
+                        "This usually means the datetime column, OHLC columns, timezone, or duplicate rows need inspection."
+                    )
+                elif research_diag["trading_days"] < 100:
+                    st.warning(
+                        "This is not yet a sufficiently long research sample for the intended 2-year test. "
+                        f"Only {research_diag['trading_days']} trading days are currently usable."
+                    )
 
                 research_trades = run_institutional_backtest(
                     research,
@@ -994,8 +1023,12 @@ if uploaded is not None:
                         "stop/target ordering."
                     )
 
+                    research_display = research_trades.copy()
+                    for col in research_display.columns:
+                        if research_display[col].dtype == "object":
+                            research_display[col] = research_display[col].astype("string")
                     st.dataframe(
-                        research_trades,
+                        research_display,
                         width="stretch",
                         hide_index=True,
                     )
