@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import datetime, time
 import os
 
 import pandas as pd
@@ -7,1157 +7,418 @@ import pytz
 import requests
 import streamlit as st
 
-# ============================================================
-# CORE STRATEGY ENGINE
-# ============================================================
-
 import strategy_engine as se
-
 from strategy_engine import (
     SYMBOL_MAP,
+    ADX_MAX_DEFAULT,
+    ATR_SL_MULTIPLIER,
+    ATR_TARGET_MULTIPLIER,
+    ENTRY_CUTOFF,
+    EOD_SQUAREOFF,
     export_trades_to_excel,
     fetch_and_prepare_data,
     generate_monthly_breakdown,
+    get_combined_12m_trades,
+    evaluate_signal,
     run_institutional_backtest,
 )
 
-
-# Safe fallback for get_combined_12m_trades if module cache is stale
-if hasattr(se, "get_combined_12m_trades"):
-    get_combined_12m_trades = se.get_combined_12m_trades
-else:
-
-    def get_combined_12m_trades(trades_df, file_path=None):
-        return trades_df
-
-
-# ============================================================
-# ZERODHA / KITE CONNECT
-# ============================================================
-
 try:
     from kiteconnect import KiteConnect
-
     KITE_AVAILABLE = True
 except ImportError:
+    KiteConnect = None
     KITE_AVAILABLE = False
 
-
-# ============================================================
-# APP CONFIGURATION
-# ============================================================
-
 IST = pytz.timezone("Asia/Kolkata")
-
-RSI_DEFAULT_OVERSOLD = 38
-RSI_DEFAULT_OVERBOUGHT = 62
-ADX_MAX = 32
-
-# No new entry after this time.
-# Existing positions are handled separately by the execution
-# / EOD-square-off mechanism.
-ENTRY_CUTOFF = time(14, 45)
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def _get_secret(name: str, default: str = "") -> str:
-    """
-    Safely retrieve a Streamlit secret, falling back to
-    environment variables.
-
-    This avoids exceptions when a secret is not configured.
-    """
-    try:
-        value = st.secrets.get(name, None)
-    except Exception:
-        value = None
-
-    if value is None:
-        value = os.getenv(name, default)
-
-    return str(value or default)
-
-
-def send_telegram_alert(message: str) -> bool:
-    """
-    Send a Telegram Markdown alert.
-
-    Returns:
-        True  -> successful delivery
-        False -> delivery failed / credentials unavailable
-    """
-
-    bot_token = _get_secret("TELEGRAM_BOT_TOKEN")
-    chat_id = _get_secret("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
-        st.warning(
-            "⚠️ Telegram Bot Token or Chat ID is not configured "
-            "in Streamlit Secrets / environment variables."
-        )
-        return False
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{bot_token}/sendMessage"
-    )
-
-    try:
-        response = requests.post(
-            url,
-            data={
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "Markdown",
-            },
-            timeout=10,
-        )
-
-        if response.status_code == 200:
-            st.info("📨 Telegram alert sent successfully.")
-            return True
-
-        st.error(
-            f"❌ Telegram Error: "
-            f"{response.status_code} - "
-            f"{response.text[:500]}"
-        )
-        return False
-
-    except requests.RequestException as exc:
-        st.error(
-            f"❌ Telegram network error: {exc}"
-        )
-        return False
-
-    except Exception as exc:
-        st.error(
-            f"❌ Telegram Exception: {exc}"
-        )
-        return False
-
-
-# ============================================================
-# EXECUTION
-# ============================================================
-
-def execute_auto_trade(
-    symbol: str,
-    action: str,
-    price: float,
-    num_lots: int,
-    lot_size: int = 65,
-    reason: str = "",
-):
-    """
-    Dispatch a signal to Telegram and, when explicitly configured,
-    place a Zerodha Kite order.
-
-    IMPORTANT:
-    We deliberately do NOT hard-code a futures contract.
-
-    The old hard-coded:
-        NIFTY24AUGFUT
-
-    is unsafe because futures contracts expire.
-
-    Live execution therefore requires:
-        KITE_TRADING_SYMBOL
-
-    in Streamlit Secrets / environment variables.
-    """
-
-    total_qty = num_lots * lot_size
-
-    alert_msg = (
-        f"🚨 *{symbol} {action} SIGNAL DETECTED* ⚡\n\n"
-        f"📌 *Asset:* {symbol}\n"
-        f"📈 *Signal Price:* ₹{price:.2f}\n"
-        f"📦 *Quantity:* {total_qty} "
-        f"({num_lots} Lot"
-        f"{'s' if num_lots > 1 else ''} "
-        f"@ {lot_size}/lot)\n"
-        f"💡 *Trigger Reason:* {reason}"
-    )
-
-    send_telegram_alert(alert_msg)
-
-    api_key = _get_secret("KITE_API_KEY")
-    access_token = _get_secret("KITE_ACCESS_TOKEN")
-
-    # --------------------------------------------------------
-    # PAPER MODE
-    # --------------------------------------------------------
-
-    if not KITE_AVAILABLE or not api_key or not access_token:
-
-        st.warning(
-            "ℹ️ Zerodha Kite credentials/package are not fully "
-            "configured. Execution recorded in Paper Mode."
-        )
-
-        return {
-            "status": "PAPER_LOGGED",
-            "symbol": symbol,
-            "action": action,
-            "quantity": total_qty,
-            "price": price,
-        }
-
-    # --------------------------------------------------------
-    # LIVE TRADING SYMBOL
-    # --------------------------------------------------------
-
-    trading_symbol = _get_secret("KITE_TRADING_SYMBOL")
-
-    if not trading_symbol:
-
-        st.error(
-            "🛑 LIVE EXECUTION BLOCKED.\n\n"
-            "KITE_TRADING_SYMBOL is not configured.\n\n"
-            "The application will never use an obsolete or "
-            "hard-coded futures contract."
-        )
-
-        send_telegram_alert(
-            f"🛑 *LIVE ORDER BLOCKED*\n\n"
-            f"Asset: {symbol}\n"
-            f"Signal: {action}\n"
-            f"Quantity: {total_qty}\n"
-            f"Reason: KITE_TRADING_SYMBOL is not configured."
-        )
-
-        return {
-            "status": "BLOCKED",
-            "reason": "KITE_TRADING_SYMBOL_NOT_CONFIGURED",
-        }
-
-    # --------------------------------------------------------
-    # LIVE KITE ORDER
-    # --------------------------------------------------------
-
-    try:
-
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
-
-        if action == "BUY":
-            transaction_type = kite.TRANSACTION_TYPE_BUY
-        elif action == "SELL":
-            transaction_type = kite.TRANSACTION_TYPE_SELL
-        else:
-            raise ValueError(
-                f"Invalid trading action: {action}"
-            )
-
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=trading_symbol,
-            transaction_type=transaction_type,
-            quantity=total_qty,
-            product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET,
-        )
-
-        st.success(
-            f"🚀 Live Kite Order Placed!\n\n"
-            f"Symbol: `{trading_symbol}`\n"
-            f"Action: `{action}`\n"
-            f"Quantity: `{total_qty}`\n"
-            f"Order ID: `{order_id}`"
-        )
-
-        send_telegram_alert(
-            f"🚀 *LIVE ORDER EXECUTED*\n\n"
-            f"Symbol: `{trading_symbol}`\n"
-            f"Action: `{action}`\n"
-            f"Order ID: `{order_id}`\n"
-            f"Qty: `{total_qty}`"
-        )
-
-        return {
-            "status": "LIVE_SUCCESS",
-            "order_id": order_id,
-            "trading_symbol": trading_symbol,
-            "quantity": total_qty,
-        }
-
-    except Exception as exc:
-
-        st.error(
-            f"❌ Kite Order Error: {exc}"
-        )
-
-        send_telegram_alert(
-            f"❌ *LIVE ORDER FAILED*\n\n"
-            f"Symbol: `{trading_symbol}`\n"
-            f"Action: `{action}`\n"
-            f"Qty: `{total_qty}`\n"
-            f"Error: `{str(exc)[:500]}`"
-        )
-
-        return {
-            "status": "FAILED",
-            "reason": str(exc),
-        }
-
-
-# ============================================================
-# STREAMLIT PAGE CONFIGURATION
-# ============================================================
 
 st.set_page_config(
     page_title="Quant Strategy & Execution Engine",
     page_icon="⚡",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+def secret(name, default=""):
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return str(value if value is not None else os.getenv(name, default))
 
-st.title(
-    "⚡ Quant Strategy & Execution Engine "
-    "(Indices & Stocks)"
-)
+def truthy(name):
+    return secret(name, "false").strip().lower() in {"1", "true", "yes", "on"}
 
+def telegram_configured():
+    return bool(secret("TELEGRAM_BOT_TOKEN") and secret("TELEGRAM_CHAT_ID"))
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+def send_telegram_alert(message, show_ui=True):
+    token, chat_id = secret("TELEGRAM_BOT_TOKEN"), secret("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        if show_ui:
+            st.error("Telegram is not configured. Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.")
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        ok = r.status_code == 200 and bool(r.json().get("ok"))
+        if show_ui:
+            (st.success if ok else st.error)(
+                "Telegram alert delivered." if ok else f"Telegram failed: HTTP {r.status_code}"
+            )
+        return ok
+    except Exception as exc:
+        if show_ui:
+            st.error(f"Telegram connection failed: {exc}")
+        return False
 
-st.sidebar.header(
-    "🎯 Asset & Capital Configuration"
-)
+def test_telegram():
+    token, chat_id = secret("TELEGRAM_BOT_TOKEN"), secret("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        st.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.")
+        return
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+        if r.status_code != 200 or not r.json().get("ok"):
+            st.error("Telegram Bot API authentication failed.")
+            return
+        bot_name = r.json()["result"].get("username", "bot")
+        message = (
+            "🟢 *Quant Engine Telegram Test*\n\n"
+            f"Bot: `@{bot_name}`\n"
+            f"Time: `{datetime.now(IST):%Y-%m-%d %H:%M:%S IST}`\n"
+            "Status: *Connection successful*"
+        )
+        send_telegram_alert(message)
+    except Exception as exc:
+        st.error(f"Telegram test failed: {exc}")
 
-selected_symbol_name = st.sidebar.selectbox(
-    "Select Asset / Stock",
-    list(SYMBOL_MAP.keys()),
-)
+def build_kite():
+    if not KITE_AVAILABLE:
+        return None
+    api_key, access_token = secret("KITE_API_KEY"), secret("KITE_ACCESS_TOKEN")
+    if not api_key or not access_token:
+        return None
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    return kite
 
-selected_asset_info = SYMBOL_MAP[
-    selected_symbol_name
-]
+def resolve_nearest_future(kite, underlying):
+    instruments = kite.instruments("NFO")
+    today = datetime.now(IST).date()
+    candidates = []
+    for inst in instruments:
+        if inst.get("instrument_type") != "FUT":
+            continue
+        if inst.get("name") != underlying:
+            continue
+        expiry = inst.get("expiry")
+        if not expiry:
+            continue
+        if hasattr(expiry, "date"):
+            expiry = expiry.date()
+        if expiry >= today:
+            candidates.append(inst)
+    if not candidates:
+        raise RuntimeError(f"No live NFO future found for {underlying}.")
+    candidates.sort(key=lambda x: x["expiry"])
+    return candidates[0]
 
-ticker = selected_asset_info["ticker"]
+def current_open_quantity(kite, trading_symbol):
+    try:
+        positions = kite.positions().get("net", [])
+        for p in positions:
+            if p.get("exchange") == "NFO" and p.get("tradingsymbol") == trading_symbol:
+                return int(p.get("quantity", 0))
+    except Exception:
+        pass
+    return 0
 
-default_lot_size = selected_asset_info["lot_size"]
+def execute_live_order(symbol_name, action, price, num_lots, configured_lot_size, reason):
+    kite = build_kite()
+    if kite is None:
+        return {"status": "PAPER_MODE", "reason": "Kite credentials/package unavailable"}
 
-capital = st.sidebar.number_input(
-    "Trading Capital (₹)",
-    value=250000.0,
-    step=25000.0,
-    format="%.2f",
-)
+    if not truthy("LIVE_TRADING_ENABLED"):
+        return {"status": "BLOCKED", "reason": "LIVE_TRADING_ENABLED is not true"}
 
-num_lots = st.sidebar.slider(
-    "Number of Lots",
-    min_value=1,
-    max_value=20,
-    value=1,
-)
+    cfg = SYMBOL_MAP[symbol_name]
+    underlying = cfg["future_underlying"]
 
-st.sidebar.caption(
-    f"Current Lot Size for {selected_symbol_name}: "
-    f"**{default_lot_size} shares**"
-)
+    try:
+        inst = resolve_nearest_future(kite, underlying)
+        trading_symbol = inst["tradingsymbol"]
+        broker_lot_size = int(inst["lot_size"])
+        quantity = num_lots * broker_lot_size
+
+        if quantity <= 0:
+            raise RuntimeError("Invalid quantity.")
+
+        open_qty = current_open_quantity(kite, trading_symbol)
+        if open_qty != 0:
+            raise RuntimeError(
+                f"Existing NFO position detected for {trading_symbol}: {open_qty}. "
+                "New signal blocked to prevent accidental stacking."
+            )
+
+        tx = kite.TRANSACTION_TYPE_BUY if action == "BUY" else kite.TRANSACTION_TYPE_SELL
+        order_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=trading_symbol,
+            transaction_type=tx,
+            quantity=quantity,
+            product=kite.PRODUCT_MIS,
+            order_type=kite.ORDER_TYPE_MARKET,
+            validity=kite.VALIDITY_DAY,
+            tag="QUANT15M",
+        )
+
+        return {
+            "status": "LIVE_ORDER_PLACED",
+            "order_id": order_id,
+            "trading_symbol": trading_symbol,
+            "quantity": quantity,
+            "lot_size": broker_lot_size,
+            "reason": reason,
+        }
+    except Exception as exc:
+        return {"status": "FAILED", "reason": str(exc)}
+
+def dispatch_trade(symbol_name, action, price, num_lots, lot_size, reason):
+    qty = num_lots * lot_size
+    signal_message = (
+        f"🚨 *{symbol_name} {action} SIGNAL*\n\n"
+        f"Price: `₹{price:.2f}`\n"
+        f"Configured Qty: `{qty}`\n"
+        f"Reason: {reason}"
+    )
+    telegram_ok = send_telegram_alert(signal_message)
+
+    if not truthy("LIVE_TRADING_ENABLED"):
+        st.info("📝 Paper Mode: no live order was placed.")
+        return {"status": "PAPER_MODE", "telegram": telegram_ok}
+
+    if not st.session_state.get("live_confirmed", False):
+        st.error("Live order blocked: confirm the live-trading checkbox first.")
+        return {"status": "BLOCKED", "reason": "LIVE_CONFIRMATION_REQUIRED"}
+
+    result = execute_live_order(symbol_name, action, price, num_lots, lot_size, reason)
+    if result["status"] == "LIVE_ORDER_PLACED":
+        st.success(
+            f"🚀 Order submitted: `{result['trading_symbol']}` "
+            f"{action} × {result['quantity']} | Order ID `{result['order_id']}`"
+        )
+        send_telegram_alert(
+            f"🚀 *LIVE ORDER SUBMITTED*\n"
+            f"Symbol: `{result['trading_symbol']}`\n"
+            f"Action: `{action}`\n"
+            f"Quantity: `{result['quantity']}`\n"
+            f"Order ID: `{result['order_id']}`",
+            show_ui=False,
+        )
+    else:
+        st.error(f"Live execution blocked/failed: {result.get('reason', 'unknown')}")
+    return result
+
+# ---------------- Sidebar ----------------
+st.sidebar.title("⚙️ Engine Controls")
+selected_name = st.sidebar.selectbox("Asset", list(SYMBOL_MAP.keys()))
+cfg = SYMBOL_MAP[selected_name]
+ticker = cfg["ticker"]
+lot_size = cfg["lot_size"]
+
+capital = st.sidebar.number_input("Capital (₹)", min_value=10000.0, value=250000.0, step=25000.0)
+num_lots = st.sidebar.number_input("Lots", min_value=1, max_value=20, value=1, step=1)
+
+st.sidebar.markdown("### Strategy")
+rsi_oversold = st.sidebar.slider("RSI Oversold", 25, 45, 38)
+rsi_overbought = st.sidebar.slider("RSI Overbought", 55, 75, 62)
+st.sidebar.caption(f"ADX must be < {ADX_MAX_DEFAULT}")
+st.sidebar.caption(f"Entry cutoff: {ENTRY_CUTOFF.strftime('%H:%M IST')}")
+st.sidebar.caption(f"EOD square-off: {EOD_SQUAREOFF.strftime('%H:%M IST')}")
 
 st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔔 Notifications")
+telegram_ok = telegram_configured()
+st.sidebar.write("Telegram:", "🟢 Configured" if telegram_ok else "🔴 Not configured")
+if st.sidebar.button("🔔 Test Telegram Alert"):
+    test_telegram()
 
-st.sidebar.header(
-    "⚙️ Strategy Parameters"
-)
-
-rsi_oversold = st.sidebar.slider(
-    "RSI Oversold Filter",
-    25,
-    45,
-    RSI_DEFAULT_OVERSOLD,
-)
-
-rsi_overbought = st.sidebar.slider(
-    "RSI Overbought Filter",
-    55,
-    75,
-    RSI_DEFAULT_OVERBOUGHT,
-)
-
-st.sidebar.caption(
-    f"ADX maximum: **{ADX_MAX}**"
-)
-
-st.sidebar.caption(
-    "Entry cutoff: **14:45 IST**"
-)
-
-
-# ============================================================
-# MARKET DATA
-# ============================================================
-
-data = fetch_and_prepare_data(
-    ticker=ticker,
-    period="1mo",
-    interval="15m",
-)
-
-
-# ------------------------------------------------------------
-# FAIL CLOSED ON MARKET DATA FAILURE
-# ------------------------------------------------------------
-
-if data.empty:
-
-    st.error(
-        f"🛑 Market data unavailable for "
-        f"**{selected_symbol_name}**."
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🛡️ Execution Safety")
+live_enabled = truthy("LIVE_TRADING_ENABLED")
+st.sidebar.write("Live trading:", "🔴 ENABLED" if live_enabled else "🟢 Paper Mode")
+if live_enabled:
+    st.session_state.live_confirmed = st.sidebar.checkbox(
+        "I understand this can place real NFO orders.",
+        value=False,
     )
-
-    st.warning(
-        "No trading signal or order will be generated. "
-        "The strategy requires reliable market data."
-    )
-
-    st.info(
-        "The market-data provider may currently be "
-        "rate-limited or temporarily unavailable. "
-        "Please retry after the provider cooldown."
-    )
-
-    st.stop()
-
-
-# ------------------------------------------------------------
-# BASIC DATA VALIDATION
-# ------------------------------------------------------------
-
-required_columns = [
-    "Open",
-    "High",
-    "Low",
-    "Close",
-    "Volume",
-    "VWAP",
-    "VWAP_Upper",
-    "VWAP_Lower",
-    "RSI",
-    "ATR",
-    "ADX",
-    "Daily_EMA50",
-]
-
-missing_columns = [
-    column
-    for column in required_columns
-    if column not in data.columns
-]
-
-if missing_columns:
-
-    st.error(
-        "🛑 Strategy data is incomplete.\n\n"
-        f"Missing columns: {missing_columns}"
-    )
-
-    st.stop()
-
-
-if len(data) < 2:
-
-    st.error(
-        "🛑 Insufficient candles to evaluate "
-        "the entry strategy."
-    )
-
-    st.stop()
-
-
-# ============================================================
-# DATASETS
-# ============================================================
-
-one_month_data = data.tail(22 * 25)
-
-
-# ============================================================
-# SECTION 1 — OPEN TRADES & LIVE CHART
-# ============================================================
-
-st.subheader(
-    f"📌 Active Market Monitor — "
-    f"{selected_symbol_name}"
-)
-
-latest = data.iloc[-1]
-previous = data.iloc[-2]
-
-last_time_ist = latest.name.strftime(
-    "%Y-%m-%d %H:%M IST"
-)
-
-
-# ============================================================
-# TREND
-# ============================================================
-
-trend_state = (
-    "BULLISH 🟢"
-    if latest["Close"] > latest["Daily_EMA50"]
-    else "BEARISH 🔴"
-)
-
-
-# ============================================================
-# EXACT ENTRY LOGIC
-# ============================================================
-
-current_candle_time = latest.name.time()
-
-
-buy_signal = (
-    previous["Close"] < previous["VWAP_Lower"]
-    and latest["Close"] > latest["Open"]
-    and latest["RSI"] < rsi_oversold
-    and latest["ADX"] < ADX_MAX
-    and current_candle_time < ENTRY_CUTOFF
-)
-
-
-sell_signal = (
-    previous["Close"] > previous["VWAP_Upper"]
-    and latest["Close"] < latest["Open"]
-    and latest["RSI"] > rsi_overbought
-    and latest["ADX"] < ADX_MAX
-    and current_candle_time < ENTRY_CUTOFF
-)
-
-
-latest_signal = "HOLD"
-
-if buy_signal:
-    latest_signal = "BUY"
-
-elif sell_signal:
-    latest_signal = "SELL"
-
-
-# ============================================================
-# LIVE METRICS
-# ============================================================
-
-c1, c2, c3, c4, c5 = st.columns(5)
-
-c1.metric(
-    "Close Price",
-    f"₹{latest['Close']:.2f}",
-)
-
-c2.metric(
-    "VWAP",
-    f"₹{latest['VWAP']:.2f}",
-)
-
-c3.metric(
-    "RSI (14)",
-    f"{latest['RSI']:.1f}",
-)
-
-c4.metric(
-    "ADX (14)",
-    f"{latest['ADX']:.1f}",
-)
-
-c5.metric(
-    "Daily Trend",
-    trend_state,
-)
-
-
-# ============================================================
-# SIGNAL STATUS
-# ============================================================
-
-if latest_signal == "BUY":
-
-    st.success(
-        f"🟢 **BUY SIGNAL ACTIVE** at "
-        f"₹{latest['Close']:.2f}\n\n"
-        f"Previous Close: "
-        f"₹{previous['Close']:.2f}\n\n"
-        f"VWAP Lower: "
-        f"₹{previous['VWAP_Lower']:.2f}\n\n"
-        f"RSI: {latest['RSI']:.1f} | "
-        f"ADX: {latest['ADX']:.1f}"
-    )
-
-    if st.button(
-        "Dispatch Auto-Trade (Telegram + Kite)",
-        type="primary",
-    ):
-
-        execute_auto_trade(
-            selected_symbol_name,
-            "BUY",
-            float(latest["Close"]),
-            num_lots,
-            default_lot_size,
-            (
-                "Previous candle below VWAP Lower + "
-                "bullish reversal candle + "
-                f"RSI < {rsi_oversold} + "
-                f"ADX < {ADX_MAX}"
-            ),
-        )
-
-
-elif latest_signal == "SELL":
-
-    st.error(
-        f"🔴 **SELL SIGNAL ACTIVE** at "
-        f"₹{latest['Close']:.2f}\n\n"
-        f"Previous Close: "
-        f"₹{previous['Close']:.2f}\n\n"
-        f"VWAP Upper: "
-        f"₹{previous['VWAP_Upper']:.2f}\n\n"
-        f"RSI: {latest['RSI']:.1f} | "
-        f"ADX: {latest['ADX']:.1f}"
-    )
-
-    if st.button(
-        "Dispatch Auto-Trade (Telegram + Kite)",
-        type="primary",
-    ):
-
-        execute_auto_trade(
-            selected_symbol_name,
-            "SELL",
-            float(latest["Close"]),
-            num_lots,
-            default_lot_size,
-            (
-                "Previous candle above VWAP Upper + "
-                "bearish reversal candle + "
-                f"RSI > {rsi_overbought} + "
-                f"ADX < {ADX_MAX}"
-            ),
-        )
-
-
 else:
+    st.session_state.live_confirmed = False
 
-    if current_candle_time >= ENTRY_CUTOFF:
+# ---------------- Header ----------------
+st.title("⚡ Quant Strategy & Execution Engine")
+st.caption("15-minute VWAP mean-reversion | RSI + ADX confirmation | ATR risk management")
 
-        st.warning(
-            f"⏱️ **ENTRY WINDOW CLOSED**\n\n"
-            f"Current candle time: "
-            f"{latest.name.strftime('%H:%M IST')}\n\n"
-            f"No new entries are permitted after "
-            f"{ENTRY_CUTOFF.strftime('%H:%M IST')}."
-        )
+data = fetch_and_prepare_data(ticker=ticker, period="1mo", interval="15m")
+if data.empty:
+    st.error(f"🛑 Reliable market data is unavailable for {selected_name}.")
+    st.warning("No signal or live order is generated when market data cannot be validated.")
+    st.stop()
 
+closed = se.get_last_closed_candles(data)
+if len(closed) < 2:
+    st.warning("Waiting for a fully closed 15-minute candle.")
+    st.stop()
+
+latest = closed.iloc[-1]
+previous = closed.iloc[-2]
+result = evaluate_signal(data, rsi_oversold, rsi_overbought, ADX_MAX_DEFAULT, require_closed=True)
+signal = result["signal"]
+
+# ---------------- Status cards ----------------
+st.subheader(f"📌 {selected_name} — Live Market Monitor")
+c1, c2, c3 = st.columns(3)
+c1.metric("Last Closed Price", f"₹{latest['Close']:.2f}")
+c2.metric("VWAP", f"₹{latest['VWAP']:.2f}")
+c3.metric("Daily Trend", latest["Daily_Trend"])
+
+c4, c5, c6 = st.columns(3)
+c4.metric("RSI (14)", f"{latest['RSI']:.1f}")
+c5.metric("ADX (14)", f"{latest['ADX']:.1f}")
+c6.metric("ATR (14)", f"₹{latest['ATR']:.2f}")
+
+data_source = data.attrs.get("data_source", "UNKNOWN")
+data_degraded = bool(data.attrs.get("degraded", False))
+if data_degraded:
+    st.warning("⚠️ Proxy/degraded market data is being displayed. Signal generation and execution are disabled until primary market data is restored.")
+st.caption(
+    f"Data source: `{data_source}` • "
+    f"Closed candle: `{latest.name:%d-%b-%Y %H:%M IST}` • "
+    f"Next decision window: `{ENTRY_CUTOFF:%H:%M IST}`"
+)
+
+if data_degraded:
+    signal = "HOLD"
+    result = dict(result)
+    result["reason"] = "DEGRADED_PROXY_DATA"
+
+if signal == "BUY":
+    st.success(f"🟢 **BUY SIGNAL** — ₹{latest['Close']:.2f}\n\n{result['reason']}")
+elif signal == "SELL":
+    st.error(f"🔴 **SELL SIGNAL** — ₹{latest['Close']:.2f}\n\n{result['reason']}")
+else:
+    if result["reason"] == "ENTRY_WINDOW_CLOSED":
+        st.warning("⏱️ Entry window closed. No new trades are permitted.")
     else:
+        st.info("⚪ **HOLD** — all entry conditions are not simultaneously satisfied.")
 
-        st.info(
-            "⚪ **No active entry signals on the "
-            "current candle.**\n\n"
-            f"Strategy Status: **HOLD**\n\n"
-            f"RSI: {latest['RSI']:.1f} | "
-            f"ADX: {latest['ADX']:.1f}"
-        )
+# ---------------- Diagnostics ----------------
+with st.expander("🔍 Signal Diagnostics", expanded=False):
+    diagnostics = pd.DataFrame([
+        ["Previous close below VWAP Lower", bool(previous["Close"] < previous["VWAP_Lower"])],
+        ["Previous close above VWAP Upper", bool(previous["Close"] > previous["VWAP_Upper"])],
+        ["Current candle bullish", bool(latest["Close"] > latest["Open"])],
+        ["Current candle bearish", bool(latest["Close"] < latest["Open"])],
+        [f"RSI < {rsi_oversold}", bool(latest["RSI"] < rsi_oversold)],
+        [f"RSI > {rsi_overbought}", bool(latest["RSI"] > rsi_overbought)],
+        [f"ADX < {ADX_MAX_DEFAULT}", bool(latest["ADX"] < ADX_MAX_DEFAULT)],
+        ["Entry window open", bool((latest.name + pd.Timedelta(minutes=15)).time() <= ENTRY_CUTOFF)],
+    ], columns=["Condition", "Pass"])
+    st.dataframe(diagnostics, width="stretch", hide_index=True)
 
-
-# ============================================================
-# STRATEGY CONDITION DIAGNOSTICS
-# ============================================================
-
-with st.expander("🔍 Current Strategy Diagnostics"):
-
-    diagnostics = pd.DataFrame(
-        {
-            "Condition": [
-                "Previous Close < VWAP Lower",
-                "Previous Close > VWAP Upper",
-                "Current Candle Bullish",
-                "Current Candle Bearish",
-                "RSI Oversold",
-                "RSI Overbought",
-                "ADX < Maximum",
-                "Entry Window Open",
-            ],
-            "Value": [
-                bool(
-                    previous["Close"]
-                    < previous["VWAP_Lower"]
-                ),
-                bool(
-                    previous["Close"]
-                    > previous["VWAP_Upper"]
-                ),
-                bool(
-                    latest["Close"]
-                    > latest["Open"]
-                ),
-                bool(
-                    latest["Close"]
-                    < latest["Open"]
-                ),
-                bool(
-                    latest["RSI"]
-                    < rsi_oversold
-                ),
-                bool(
-                    latest["RSI"]
-                    > rsi_overbought
-                ),
-                bool(
-                    latest["ADX"]
-                    < ADX_MAX
-                ),
-                bool(
-                    current_candle_time
-                    < ENTRY_CUTOFF
-                ),
-            ],
-        }
-    )
-
-    st.dataframe(
-        diagnostics,
-        width="stretch",
-        hide_index=True,
-    )
-
-
-# ============================================================
-# INTRADAY CHART
-# ============================================================
-
-recent_chart = data.tail(120)
-
-min_y = (
-    float(recent_chart["Low"].min())
-    - 10.0
-)
-
-max_y = (
-    float(recent_chart["High"].max())
-    + 10.0
-)
-
-
+# ---------------- Chart ----------------
+chart = data.tail(120)
 fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=chart.index, open=chart["Open"], high=chart["High"],
+    low=chart["Low"], close=chart["Close"], name="15m",
+))
+fig.add_trace(go.Scatter(x=chart.index, y=chart["VWAP"], name="VWAP", mode="lines"))
+fig.add_trace(go.Scatter(x=chart.index, y=chart["VWAP_Upper"], name="VWAP Upper", mode="lines", line=dict(dash="dash")))
+fig.add_trace(go.Scatter(x=chart.index, y=chart["VWAP_Lower"], name="VWAP Lower", mode="lines", line=dict(dash="dash")))
+fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15.5, 9.25], pattern="hour")])
+fig.update_layout(height=500, xaxis_title="Time (IST)", yaxis_title="Price (₹)", template="plotly_dark", margin=dict(l=10, r=10, t=45, b=10))
+st.plotly_chart(fig, width="stretch")
 
-
-fig.add_trace(
-    go.Scatter(
-        x=recent_chart.index,
-        y=recent_chart["Close"],
-        mode="lines",
-        name="Close",
-        line=dict(
-            color="#1f77b4",
-            width=2,
-        ),
+# ---------------- Execution ----------------
+if signal in {"BUY", "SELL"} and not data_degraded:
+    st.markdown("---")
+    st.subheader("🚦 Trade Dispatch")
+    st.write(
+        f"Signal: **{signal}** | Lots: **{num_lots}** | "
+        f"Configured quantity: **{num_lots * lot_size}**"
     )
-)
+    if live_enabled:
+        st.warning("Live trading is enabled. The broker's nearest valid futures contract and current lot size will be resolved dynamically.")
+    else:
+        st.info("Paper Mode is active. Clicking dispatch will send Telegram but will not place a live order.")
+    if st.button(f"Dispatch {signal} — Telegram + Execution", type="primary"):
+        dispatch_trade(selected_name, signal, float(latest["Close"]), int(num_lots), lot_size, result["reason"])
 
-
-fig.add_trace(
-    go.Scatter(
-        x=recent_chart.index,
-        y=recent_chart["VWAP"],
-        mode="lines",
-        name="VWAP",
-        line=dict(
-            color="#ff7f0e",
-            width=1.5,
-        ),
-    )
-)
-
-
-fig.add_trace(
-    go.Scatter(
-        x=recent_chart.index,
-        y=recent_chart["VWAP_Upper"],
-        mode="lines",
-        name="VWAP Upper",
-        line=dict(
-            color="#d62728",
-            width=1,
-            dash="dash",
-        ),
-    )
-)
-
-
-fig.add_trace(
-    go.Scatter(
-        x=recent_chart.index,
-        y=recent_chart["VWAP_Lower"],
-        mode="lines",
-        name="VWAP Lower",
-        line=dict(
-            color="#2ca02c",
-            width=1,
-            dash="dash",
-        ),
-    )
-)
-
-
-fig.update_xaxes(
-    rangebreaks=[
-        dict(bounds=["sat", "mon"]),
-        dict(
-            bounds=[15.5, 9.25],
-            pattern="hour",
-        ),
-    ]
-)
-
-
-fig.update_layout(
-    title=(
-        f"{selected_symbol_name} Active Market "
-        f"Sessions (09:15 - 15:30 IST) — "
-        f"{last_time_ist}"
-    ),
-    yaxis=dict(
-        range=[min_y, max_y],
-        title="Price (₹)",
-    ),
-    xaxis=dict(
-        title="Time (IST)",
-    ),
-    template="plotly_dark",
-    height=420,
-)
-
-
-st.plotly_chart(
-    fig,
-    width="stretch",
-)
-
-
-# ============================================================
-# SECTION 2 — 1-MONTH PERFORMANCE
-# ============================================================
-
+# ---------------- Backtest ----------------
 st.markdown("---")
-
-st.subheader(
-    "📊 Current Month Executed Trades & Performance"
-)
-
-
-trades_1m = run_institutional_backtest(
-    one_month_data,
+st.subheader("📊 Current 1-Month Strategy Performance")
+trades = pd.DataFrame() if data_degraded else run_institutional_backtest(
+    data,
     rsi_oversold=rsi_oversold,
     rsi_overbought=rsi_overbought,
-    num_lots=num_lots,
-    lot_size=default_lot_size,
+    adx_max=ADX_MAX_DEFAULT,
+    sl_atr_mult=ATR_SL_MULTIPLIER,
+    tgt_atr_mult=ATR_TARGET_MULTIPLIER,
+    num_lots=int(num_lots),
+    lot_size=lot_size,
 )
-
-
-if not trades_1m.empty:
-
-    total_trades_1m = len(trades_1m)
-
-    winning_trades_1m = len(
-        trades_1m[
-            trades_1m["NetPnL"] > 0
-        ]
-    )
-
-    win_rate_1m = (
-        winning_trades_1m
-        / total_trades_1m
-    ) * 100
-
-    net_pnl_1m = (
-        trades_1m["NetPnL"].sum()
-    )
-
-    return_on_capital_1m = (
-        net_pnl_1m / capital
-    ) * 100
-
-
+if data_degraded:
+    st.info("Backtest is disabled while only degraded proxy data is available.")
+elif trades.empty:
+    st.info("No completed backtest trades in the available period.")
+else:
+    total = len(trades)
+    wins = int((trades["NetPnL"] > 0).sum())
+    pnl = float(trades["NetPnL"].sum())
+    win_rate = wins / total * 100
     m1, m2, m3, m4 = st.columns(4)
-
-
-    m1.metric(
-        "Total Trades (1Mo)",
-        total_trades_1m,
-    )
-
-
-    m2.metric(
-        "Win Rate %",
-        f"{win_rate_1m:.1f}%",
-    )
-
-
-    m3.metric(
-        "Net Profit / Loss",
-        f"₹{net_pnl_1m:,.2f}",
-    )
-
-
-    m4.metric(
-        "1-Mo Return on Capital",
-        f"{return_on_capital_1m:+.2f}%",
-    )
-
-
-    display_df = trades_1m.copy()
-
-
-    if "Type" in display_df.columns:
-
-        display_df["Type"] = (
-            display_df["Type"].apply(
-                lambda x:
-                    "🟢 BUY"
-                    if x == "BUY"
-                    else "🔴 SELL"
-            )
-        )
-
-
-    excel_bytes = export_trades_to_excel(
-        trades_1m
-    )
-
-
+    m1.metric("Trades", total)
+    m2.metric("Win Rate", f"{win_rate:.1f}%")
+    m3.metric("Net P&L", f"₹{pnl:,.0f}")
+    m4.metric("Return on Capital", f"{pnl / capital * 100:+.2f}%")
     st.download_button(
-        label=(
-            "📥 Download Executed "
-            "Trades (Excel)"
-        ),
-        data=excel_bytes,
-        file_name=(
-            f"{selected_symbol_name}_"
-            "Executed_Trades_Current_Month.xlsx"
-        ),
-        mime=(
-            "application/"
-            "vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
+        "📥 Download Trades Excel",
+        data=export_trades_to_excel(trades),
+        file_name=f"{selected_name}_15m_trades.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    st.dataframe(trades, width="stretch", hide_index=True)
 
-
-    st.dataframe(
-        display_df,
-        width="stretch",
-        column_config={
-            "Charges": st.column_config.NumberColumn(
-                "Charges (₹)",
-                help=(
-                    "Estimated brokerage & "
-                    "exchange charges"
-                ),
-                format="₹%.2f",
-            )
-        },
-    )
-
-
-else:
-
-    st.info(
-        "No trades triggered during the "
-        "current month period."
-    )
-
-
-# ============================================================
-# SECTION 3 — 12-MONTH PERFORMANCE
-# ============================================================
-
+# ---------------- 12m ----------------
 st.markdown("---")
+st.subheader("🗓️ Historical Performance")
+if "show_history" not in st.session_state:
+    st.session_state.show_history = False
+if st.button("📈 Load 12-Month Breakdown"):
+    st.session_state.show_history = True
 
-st.subheader(
-    "🗓️ Last 12 Months Performance Breakdown"
-)
-
-
-# Use session_state to remember whether the user
-# requested historical performance.
-
-if "show_past_performance" not in st.session_state:
-
-    st.session_state.show_past_performance = False
-
-
-cols = st.columns([2, 1])
-
-
-with cols[0]:
-
-    if st.button(
-        "📈 Show Past Performance (12 months)"
-    ):
-
-        st.session_state.show_past_performance = True
-
-
-with cols[1]:
-
-    if st.session_state.show_past_performance:
-
-        if st.button(
-            "Hide Past Performance"
-        ):
-
-            st.session_state.show_past_performance = False
-
-
-if st.session_state.show_past_performance:
-
-    with st.spinner(
-        "Loading past performance "
-        "(may take a few seconds)..."
-    ):
-
-        # Run the backtest using the available
-        # market data.
-
-        trades_60d = run_institutional_backtest(
-            data,
-            rsi_oversold=rsi_oversold,
-            rsi_overbought=rsi_overbought,
-            num_lots=num_lots,
-            lot_size=default_lot_size,
-        )
-
-
-        # Combine current data with persistent
-        # historical JSON trade records.
-
-        trades_12m = get_combined_12m_trades(
-            trades_60d
-        )
-
-
-        if not trades_12m.empty:
-
-            monthly_table = (
-                generate_monthly_breakdown(
-                    trades_12m,
-                    capital,
-                )
-            )
-
-
-            st.dataframe(
-                monthly_table,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Actual Profit %":
-                        st.column_config.TextColumn(
-                            "Actual Profit %",
-                            help=(
-                                "Net Return percentage "
-                                "calculated on capital input"
-                            ),
-                        )
-                },
-            )
-
-
-            # ------------------------------------------------
-            # TIMEZONE-SAFE MONTHLY GROUPING
-            # ------------------------------------------------
-
-            exit_times = pd.to_datetime(
-                trades_12m["ExitTime"],
-                errors="coerce",
-            )
-
-
-            if (
-                hasattr(exit_times.dt, "tz")
-                and exit_times.dt.tz is not None
-            ):
-
-                exit_times = (
-                    exit_times.dt.tz_localize(None)
-                )
-
-
-            trades_12m = trades_12m.copy()
-
-            trades_12m["YearMonth"] = (
-                exit_times.dt.strftime("%b %Y")
-            )
-
-
-            monthly_pnl_series = (
-                trades_12m
-                .dropna(subset=["YearMonth"])
-                .groupby(
-                    "YearMonth",
-                    sort=False,
-                )["NetPnL"]
-                .sum()
-            )
-
-
-            colors = [
-                "#2ecc71"
-                if value >= 0
-                else "#e74c3c"
-                for value
-                in monthly_pnl_series.values
-            ]
-
-
-            fig_bar = go.Figure(
-                data=[
-                    go.Bar(
-                        x=monthly_pnl_series.index,
-                        y=monthly_pnl_series.values,
-                        marker_color=colors,
-                    )
-                ]
-            )
-
-
-            fig_bar.update_layout(
-                title=(
-                    "Monthly Net Profit / Loss "
-                    "Breakdown (₹)"
-                ),
-                xaxis_title="Month",
-                yaxis_title="Net PnL (₹)",
-                template="plotly_dark",
-                height=380,
-            )
-
-
-            st.plotly_chart(
-                fig_bar,
-                width="stretch",
-            )
-
-
-        else:
-
-            st.info(
-                "Insufficient historical data to "
-                "generate 12-month summary."
-            )
-
-
+if st.session_state.show_history:
+    combined = get_combined_12m_trades(trades)
+    if combined.empty:
+        st.info("No historical trade records available.")
+    else:
+        table = generate_monthly_breakdown(combined, capital)
+        st.dataframe(table, width="stretch", hide_index=True)
+        if "ExitTime" in combined.columns:
+            x = pd.to_datetime(combined["ExitTime"], errors="coerce")
+            if x.dt.tz is not None:
+                x = x.dt.tz_localize(None)
+            combined = combined.copy()
+            combined["Month"] = x.dt.strftime("%b %Y")
+            monthly = combined.groupby("Month", sort=False)["NetPnL"].sum()
+            fig2 = go.Figure(go.Bar(x=monthly.index, y=monthly.values))
+            fig2.update_layout(height=350, template="plotly_dark", yaxis_title="Net P&L (₹)")
+            st.plotly_chart(fig2, width="stretch")
 else:
-
-    st.info(
-        "Click 'Show Past Performance' to load "
-        "historical 12-month results."
-    )
+    st.caption("Historical results are loaded only when requested.")

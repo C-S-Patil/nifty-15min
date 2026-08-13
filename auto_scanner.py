@@ -1,199 +1,125 @@
+import json
 import os
-from datetime import time
+from datetime import datetime, time
+from pathlib import Path
 
 import requests
 
 from strategy_engine import (
+    IST,
     SYMBOL_MAP,
+    ADX_MAX_DEFAULT,
+    RSI_OVERBOUGHT_DEFAULT,
+    RSI_OVERSOLD_DEFAULT,
     fetch_and_prepare_data,
+    evaluate_signal,
 )
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+STATE_FILE = Path("data/scanner_state.json")
 
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    "",
-)
-
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    "",
-)
-
-
-RSI_OVERSOLD = 38
-RSI_OVERBOUGHT = 62
-ADX_MAX = 32
-
-
-def send_telegram_alert(message: str) -> bool:
-
+def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing.")
+        print("ERROR: Telegram credentials are missing.")
         return False
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    )
-
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        response = requests.post(
+        r = requests.post(
             url,
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
-                "parse_mode": "Markdown",
-            },
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"},
             timeout=10,
         )
-
-        if response.status_code != 200:
-            print(
-                f"❌ Telegram HTTP {response.status_code}: "
-                f"{response.text[:300]}"
-            )
+        if r.status_code != 200:
+            print(f"ERROR: Telegram HTTP {r.status_code}: {r.text[:500]}")
             return False
-
-        return True
-
+        return bool(r.json().get("ok", False))
     except requests.RequestException as exc:
-        print(f"❌ Telegram Exception: {exc}")
+        print(f"ERROR: Telegram request failed: {exc}")
+        return False
+    except ValueError:
         return False
 
+def load_state():
+    try:
+        if STATE_FILE.exists():
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"WARNING: state read failed: {exc}")
+    return {}
+
+def save_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp.replace(STATE_FILE)
 
 def run_scanner():
+    now = datetime.now(IST)
+    print(f"Scanner time: {now:%Y-%m-%d %H:%M:%S %Z}")
 
-    ticker = SYMBOL_MAP["Nifty 50"]["ticker"]
-    lot_size = SYMBOL_MAP["Nifty 50"]["lot_size"]
+    if now.weekday() >= 5 or not (time(9, 15) <= now.time() <= time(15, 30)):
+        print("Outside NSE market hours. No scan.")
+        return 0
 
-    print(
-        f"📡 Scanner starting for {ticker}"
-    )
-
-    # ONE provider call.
-    # fetch_and_prepare_data() now owns the fallback logic.
-    df = fetch_and_prepare_data(
-        ticker=ticker,
-        period="1mo",
-        interval="15m",
-    )
+    name = "Nifty 50"
+    cfg = SYMBOL_MAP[name]
+    df = fetch_and_prepare_data(cfg["ticker"], period="1mo", interval="15m")
 
     if df.empty:
-        print(
-            "🛑 MARKET DATA UNAVAILABLE. "
-            "No signal will be generated."
-        )
-        return
+        print("MARKET DATA UNAVAILABLE. No signal and no alert.")
+        return 0
 
-    if len(df) < 3:
-        print(
-            "🛑 Insufficient market data. "
-            "No signal will be generated."
-        )
-        return
+    if bool(df.attrs.get("degraded", False)):
+        print("DEGRADED PROXY DATA. No automated signal is permitted.")
+        return 0
 
-    latest = df.iloc[-1]
-    previous = df.iloc[-2]
+    result = evaluate_signal(
+        df,
+        rsi_oversold=RSI_OVERSOLD_DEFAULT,
+        rsi_overbought=RSI_OVERBOUGHT_DEFAULT,
+        adx_max=ADX_MAX_DEFAULT,
+        require_closed=True,
+    )
+    signal = result["signal"]
 
-    required_columns = [
-        "Open",
-        "Close",
-        "VWAP_Lower",
-        "VWAP_Upper",
-        "RSI",
-        "ADX",
-    ]
+    if signal == "HOLD":
+        print(f"HOLD: {result['reason']}")
+        return 0
 
-    missing = [
-        col
-        for col in required_columns
-        if col not in df.columns
-    ]
+    row = result["row"]
+    decision_time = result["decision_time"]
+    candle_key = f"{name}|{signal}|{row.name.isoformat()}"
 
-    if missing:
-        print(
-            f"🛑 Missing strategy columns: {missing}"
-        )
-        return
+    state = load_state()
+    if state.get("last_alert_key") == candle_key:
+        print(f"Duplicate signal suppressed: {candle_key}")
+        return 0
 
-    current_time = latest.name.time()
-
-    # Never generate an entry after the entry cutoff.
-    if current_time >= time(14, 45):
-        print(
-            f"⏱️ Entry window closed: "
-            f"{latest.name.strftime('%H:%M IST')}"
-        )
-        return
-
-    # Exact established strategy.
-    buy_signal = (
-        previous["Close"]
-        < previous["VWAP_Lower"]
-        and latest["Close"]
-        > latest["Open"]
-        and latest["RSI"]
-        < RSI_OVERSOLD
-        and latest["ADX"]
-        < ADX_MAX
+    message = (
+        f"🚨 *AUTOMATED {name} {signal} SIGNAL* ⚡\n\n"
+        f"📌 Asset: *{name}*\n"
+        f"🕯️ Closed candle: `{row.name:%Y-%m-%d %H:%M IST}`\n"
+        f"🧭 Decision time: `{decision_time:%H:%M IST}`\n"
+        f"💰 Price: `₹{row['Close']:.2f}`\n"
+        f"📊 RSI(14): `{row['RSI']:.2f}`\n"
+        f"📉 ADX(14): `{row['ADX']:.2f}`\n"
+        f"📈 VWAP: `₹{row['VWAP']:.2f}`\n"
+        f"🛡️ SL: `{row['ATR']*2.5:.2f} ATR`\n"
+        f"🎯 Target: `{row['ATR']*3.5:.2f} ATR`\n\n"
+        f"💡 {result['reason']}\n\n"
+        f"⚠️ Signal only — no live order is placed by GitHub Actions."
     )
 
-    sell_signal = (
-        previous["Close"]
-        > previous["VWAP_Upper"]
-        and latest["Close"]
-        < latest["Open"]
-        and latest["RSI"]
-        > RSI_OVERBOUGHT
-        and latest["ADX"]
-        < ADX_MAX
-    )
+    if not send_telegram_alert(message):
+        print("Telegram delivery failed; state NOT advanced so the next run can retry.")
+        return 1
 
-    signal = None
-
-    if buy_signal:
-        signal = "BUY"
-
-    elif sell_signal:
-        signal = "SELL"
-
-    timestamp = latest.name.strftime(
-        "%Y-%m-%d %H:%M IST"
-    )
-
-    if not signal:
-        print(
-            f"⚪ HOLD | {timestamp} | "
-            f"RSI={latest['RSI']:.2f} "
-            f"ADX={latest['ADX']:.2f}"
-        )
-        return
-
-    total_qty = lot_size
-
-    alert_msg = (
-        f"🚨 *AUTOMATED NIFTY "
-        f"{signal} SIGNAL* ⚡\n\n"
-        f"📌 *Asset:* Nifty 50\n"
-        f"🕐 *Candle:* {timestamp}\n"
-        f"📈 *Price:* ₹{latest['Close']:.2f}\n"
-        f"📦 *Quantity:* {total_qty}\n"
-        f"📊 *RSI:* {latest['RSI']:.2f}\n"
-        f"📉 *ADX:* {latest['ADX']:.2f}\n"
-        f"💡 *Reason:* VWAP reversal + "
-        f"RSI + ADX confirmation"
-    )
-
-    if send_telegram_alert(alert_msg):
-        print(
-            f"✅ Automated {signal} alert dispatched."
-        )
-    else:
-        print(
-            f"⚠️ {signal} detected but Telegram "
-            f"delivery failed."
-        )
-
+    state["last_alert_key"] = candle_key
+    state["last_alert_at"] = now.isoformat()
+    save_state(state)
+    print(f"ALERT SENT: {candle_key}")
+    return 0
 
 if __name__ == "__main__":
-    run_scanner()
+    raise SystemExit(run_scanner())
