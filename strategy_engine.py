@@ -47,15 +47,15 @@ SYMBOL_MAP = {
 
 
 def _fetch_direct_yahoo_chart(
-    ticker: str, range_str: str = "30d", interval: str = "15m"
+    ticker: str, range_str: str = "1mo", interval: str = "15m"
 ) -> pd.DataFrame:
-    """Direct HTTP fetch to Yahoo Finance chart API with realistic browser headers."""
+    """Direct HTTP fetch to Yahoo Finance chart API with realistic headers."""
     encoded_ticker = quote(ticker)
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded_ticker}?range={range_str}&interval={interval}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "*/*",
     }
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -89,55 +89,48 @@ def _fetch_direct_yahoo_chart(
 
 
 def fetch_and_prepare_data(
-    ticker: str = "^NSEI", period: str = "30d", interval: str = "15m"
+    ticker: str = "^NSEI", period: str = "1mo", interval: str = "15m"
 ) -> pd.DataFrame:
-    """Fetches market data with multi-stage fallback (Direct API -> yfinance -> ETF Proxy) to defeat cloud IP blocking."""
+    """Fetches market data with fallback (yfinance 1mo -> Direct Yahoo API -> ETF Proxy) to ensure index data loads."""
     df = pd.DataFrame()
 
-    # Stage 1: Try Direct Yahoo Chart API on original ticker
-    df = _fetch_direct_yahoo_chart(
-        ticker=ticker, range_str="30d", interval=interval
-    )
+    # Stage 1: Standard yfinance with 1mo period (valid intraday range for indices)
+    try:
+        df = yf.download(
+            tickers=ticker, period="1mo", interval=interval, progress=False
+        )
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+    except Exception:
+        df = pd.DataFrame()
 
-    # Stage 2: Try standard yfinance on original ticker
+    # Stage 2: Direct Yahoo Endpoint Fallback
     if df.empty:
+        df = _fetch_direct_yahoo_chart(
+            ticker=ticker, range_str="1mo", interval=interval
+        )
+
+    # Stage 3: ETF Proxy Fallback (NIFTYBEES / BANKBEES) if index is blocked
+    if df.empty and ticker in ["^NSEI", "^NSEBANK"]:
+        proxy_ticker = "NIFTYBEES.NS" if ticker == "^NSEI" else "BANKBEES.NS"
         try:
             df = yf.download(
-                tickers=ticker,
-                period="30d",
+                tickers=proxy_ticker,
+                period="1mo",
                 interval=interval,
                 progress=False,
             )
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
+
+            if not df.empty and proxy_ticker == "NIFTYBEES.NS":
+                scale = 100.0
+                df["Open"] *= scale
+                df["High"] *= scale
+                df["Low"] *= scale
+                df["Close"] *= scale
         except Exception:
             df = pd.DataFrame()
-
-    # Stage 3: ETF Proxy Fallback if Index (^NSEI, ^NSEBANK) is blocked on server IP
-    if df.empty:
-        proxy_ticker = "NIFTYBEES.NS" if "^NSEI" in ticker else "BANKBEES.NS"
-        if ticker in ["^NSEI", "^NSEBANK"]:
-            try:
-                df = yf.download(
-                    tickers=proxy_ticker,
-                    period="30d",
-                    interval=interval,
-                    progress=False,
-                )
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-
-                # Scale ETF price proxy to actual index values for visual parity
-                if not df.empty and proxy_ticker == "NIFTYBEES.NS":
-                    scale_factor = (
-                        100.0  # NIFTYBEES is approximately 1/100th of Nifty
-                    )
-                    df["Open"] = df["Open"] * scale_factor
-                    df["High"] = df["High"] * scale_factor
-                    df["Low"] = df["Low"] * scale_factor
-                    df["Close"] = df["Close"] * scale_factor
-            except Exception:
-                df = pd.DataFrame()
 
     if df.empty:
         return pd.DataFrame()
