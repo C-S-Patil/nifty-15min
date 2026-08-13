@@ -331,64 +331,83 @@ if not trades_1m.empty:
 else:
     st.info("No trades triggered during the current month period.")
 
-# SECTION 3: 12-MONTH MONTHLY BREAKDOWN
+# SECTION 3: 12-MONTH MONTHLY BREAKDOWN (lazy / on-click)
 st.markdown("---")
 st.subheader("🗓️ Last 12 Months Performance Breakdown")
 
-trades_60d = run_institutional_backtest(
-    data,
-    rsi_oversold=rsi_oversold,
-    rsi_overbought=rsi_overbought,
-    num_lots=num_lots,
-    lot_size=default_lot_size,
-)
+# Use session_state to remember whether the user requested past performance
+if "show_past_performance" not in st.session_state:
+    st.session_state.show_past_performance = False
 
-# Combined 60-day live trades with local JSON history
-trades_12m = get_combined_12m_trades(trades_60d)
+cols = st.columns([2, 1])
+with cols[0]:
+    if st.button("📈 Show Past Performance (12 months)"):
+        st.session_state.show_past_performance = True
 
-if not trades_12m.empty:
-    monthly_table = generate_monthly_breakdown(trades_12m, capital)
+with cols[1]:
+    if st.session_state.show_past_performance:
+        if st.button("Hide Past Performance"):
+            st.session_state.show_past_performance = False
 
-    st.dataframe(
-        monthly_table,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Actual Profit %": st.column_config.TextColumn(
-                "Actual Profit %",
-                help="Net Return percentage calculated on capital input",
+if st.session_state.show_past_performance:
+    with st.spinner("Loading past performance (may take a few seconds)..."):
+        # Run the 60-day backtest and combine with local historical data only now
+        trades_60d = run_institutional_backtest(
+            data,
+            rsi_oversold=rsi_oversold,
+            rsi_overbought=rsi_overbought,
+            num_lots=num_lots,
+            lot_size=default_lot_size,
+        )
+
+        # Combined 60-day live trades with local JSON history (this will load local file)
+        trades_12m = get_combined_12m_trades(trades_60d)
+
+        if not trades_12m.empty:
+            monthly_table = generate_monthly_breakdown(trades_12m, capital)
+
+            st.dataframe(
+                monthly_table,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Actual Profit %": st.column_config.TextColumn(
+                        "Actual Profit %",
+                        help="Net Return percentage calculated on capital input",
+                    )
+                },
             )
-        },
-    )
 
-    trades_12m["YearMonth"] = pd.to_datetime(
-        trades_12m["ExitTime"]
-    ).dt.strftime("%b %Y")
-    monthly_pnl_series = trades_12m.groupby("YearMonth", sort=False)[
-        "NetPnL"
-    ].sum()
+            trades_12m["YearMonth"] = pd.to_datetime(
+                trades_12m["ExitTime"]
+            ).dt.strftime("%b %Y")
+            monthly_pnl_series = trades_12m.groupby("YearMonth", sort=False)[
+                "NetPnL"
+            ].sum()
 
-    colors = [
-        "#2ecc71" if val >= 0 else "#e74c3c"
-        for val in monthly_pnl_series.values
-    ]
+            colors = [
+                "#2ecc71" if val >= 0 else "#e74c3c"
+                for val in monthly_pnl_series.values
+            ]
 
-    fig_bar = go.Figure(
-        data=[
-            go.Bar(
-                x=monthly_pnl_series.index,
-                y=monthly_pnl_series.values,
-                marker_color=colors,
+            fig_bar = go.Figure(
+                data=[
+                    go.Bar(
+                        x=monthly_pnl_series.index,
+                        y=monthly_pnl_series.values,
+                        marker_color=colors,
+                    )
+                ]
             )
-        ]
-    )
-    fig_bar.update_layout(
-        title="Monthly Net Profit / Loss Breakdown (₹)",
-        xaxis_title="Month",
-        yaxis_title="Net PnL (₹)",
-        template="plotly_dark",
-        height=380,
-    )
-    st.plotly_chart(fig_bar, width="stretch")
+            fig_bar.update_layout(
+                title="Monthly Net Profit / Loss Breakdown (₹)",
+                xaxis_title="Month",
+                yaxis_title="Net PnL (₹)",
+                template="plotly_dark",
+                height=380,
+            )
+            st.plotly_chart(fig_bar, width="stretch")
+        else:
+            st.info("Insufficient historical data to generate 12-month summary.")
 else:
-    st.info("Insufficient historical data to generate 12-month summary.")
+    st.info("Click 'Show Past Performance' to load historical 12-month results.")
