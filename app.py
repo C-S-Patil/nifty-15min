@@ -902,4 +902,262 @@ if not trades_1m.empty:
 
 
     m3.metric(
-   
+        "Net Profit / Loss",
+        f"₹{net_pnl_1m:,.2f}",
+    )
+
+
+    m4.metric(
+        "1-Mo Return on Capital",
+        f"{return_on_capital_1m:+.2f}%",
+    )
+
+
+    display_df = trades_1m.copy()
+
+
+    if "Type" in display_df.columns:
+
+        display_df["Type"] = (
+            display_df["Type"].apply(
+                lambda x:
+                    "🟢 BUY"
+                    if x == "BUY"
+                    else "🔴 SELL"
+            )
+        )
+
+
+    excel_bytes = export_trades_to_excel(
+        trades_1m
+    )
+
+
+    st.download_button(
+        label=(
+            "📥 Download Executed "
+            "Trades (Excel)"
+        ),
+        data=excel_bytes,
+        file_name=(
+            f"{selected_symbol_name}_"
+            "Executed_Trades_Current_Month.xlsx"
+        ),
+        mime=(
+            "application/"
+            "vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+    )
+
+
+    st.dataframe(
+        display_df,
+        width="stretch",
+        column_config={
+            "Charges": st.column_config.NumberColumn(
+                "Charges (₹)",
+                help=(
+                    "Estimated brokerage & "
+                    "exchange charges"
+                ),
+                format="₹%.2f",
+            )
+        },
+    )
+
+
+else:
+
+    st.info(
+        "No trades triggered during the "
+        "current month period."
+    )
+
+
+# ============================================================
+# SECTION 3 — 12-MONTH PERFORMANCE
+# ============================================================
+
+st.markdown("---")
+
+st.subheader(
+    "🗓️ Last 12 Months Performance Breakdown"
+)
+
+
+# Use session_state to remember whether the user
+# requested historical performance.
+
+if "show_past_performance" not in st.session_state:
+
+    st.session_state.show_past_performance = False
+
+
+cols = st.columns([2, 1])
+
+
+with cols[0]:
+
+    if st.button(
+        "📈 Show Past Performance (12 months)"
+    ):
+
+        st.session_state.show_past_performance = True
+
+
+with cols[1]:
+
+    if st.session_state.show_past_performance:
+
+        if st.button(
+            "Hide Past Performance"
+        ):
+
+            st.session_state.show_past_performance = False
+
+
+if st.session_state.show_past_performance:
+
+    with st.spinner(
+        "Loading past performance "
+        "(may take a few seconds)..."
+    ):
+
+        # Run the backtest using the available
+        # market data.
+
+        trades_60d = run_institutional_backtest(
+            data,
+            rsi_oversold=rsi_oversold,
+            rsi_overbought=rsi_overbought,
+            num_lots=num_lots,
+            lot_size=default_lot_size,
+        )
+
+
+        # Combine current data with persistent
+        # historical JSON trade records.
+
+        trades_12m = get_combined_12m_trades(
+            trades_60d
+        )
+
+
+        if not trades_12m.empty:
+
+            monthly_table = (
+                generate_monthly_breakdown(
+                    trades_12m,
+                    capital,
+                )
+            )
+
+
+            st.dataframe(
+                monthly_table,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Actual Profit %":
+                        st.column_config.TextColumn(
+                            "Actual Profit %",
+                            help=(
+                                "Net Return percentage "
+                                "calculated on capital input"
+                            ),
+                        )
+                },
+            )
+
+
+            # ------------------------------------------------
+            # TIMEZONE-SAFE MONTHLY GROUPING
+            # ------------------------------------------------
+
+            exit_times = pd.to_datetime(
+                trades_12m["ExitTime"],
+                errors="coerce",
+            )
+
+
+            if (
+                hasattr(exit_times.dt, "tz")
+                and exit_times.dt.tz is not None
+            ):
+
+                exit_times = (
+                    exit_times.dt.tz_localize(None)
+                )
+
+
+            trades_12m = trades_12m.copy()
+
+            trades_12m["YearMonth"] = (
+                exit_times.dt.strftime("%b %Y")
+            )
+
+
+            monthly_pnl_series = (
+                trades_12m
+                .dropna(subset=["YearMonth"])
+                .groupby(
+                    "YearMonth",
+                    sort=False,
+                )["NetPnL"]
+                .sum()
+            )
+
+
+            colors = [
+                "#2ecc71"
+                if value >= 0
+                else "#e74c3c"
+                for value
+                in monthly_pnl_series.values
+            ]
+
+
+            fig_bar = go.Figure(
+                data=[
+                    go.Bar(
+                        x=monthly_pnl_series.index,
+                        y=monthly_pnl_series.values,
+                        marker_color=colors,
+                    )
+                ]
+            )
+
+
+            fig_bar.update_layout(
+                title=(
+                    "Monthly Net Profit / Loss "
+                    "Breakdown (₹)"
+                ),
+                xaxis_title="Month",
+                yaxis_title="Net PnL (₹)",
+                template="plotly_dark",
+                height=380,
+            )
+
+
+            st.plotly_chart(
+                fig_bar,
+                width="stretch",
+            )
+
+
+        else:
+
+            st.info(
+                "Insufficient historical data to "
+                "generate 12-month summary."
+            )
+
+
+else:
+
+    st.info(
+        "Click 'Show Past Performance' to load "
+        "historical 12-month results."
+    )
