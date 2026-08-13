@@ -319,8 +319,9 @@ def dispatch_trade(symbol_name, action, row, num_lots, reason):
 st.sidebar.title("⚙️ Engine Controls")
 
 selected_name = st.sidebar.selectbox(
-    "Asset",
-    list(SYMBOL_MAP.keys()),
+    "Index",
+    ["Nifty 50", "Bank Nifty"],
+    help="This release supports Nifty 50 and Bank Nifty only. Stock support will be added later after the index strategy is validated.",
 )
 cfg = SYMBOL_MAP[selected_name]
 ticker = cfg["ticker"]

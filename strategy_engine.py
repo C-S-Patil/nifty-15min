@@ -49,14 +49,7 @@ SYMBOL_MAP = {
         "lot_size": 15,
         "future_underlying": "BANKNIFTY",
     },
-    "TCS": {"ticker": "TCS.NS", "proxy": "TCS.NS", "lot_size": 175, "future_underlying": "TCS"},
-    "Infosys (INFY)": {"ticker": "INFY.NS", "proxy": "INFY.NS", "lot_size": 400, "future_underlying": "INFY"},
-    "State Bank of India (SBIN)": {"ticker": "SBIN.NS", "proxy": "SBIN.NS", "lot_size": 750, "future_underlying": "SBIN"},
-    "HDFC Bank": {"ticker": "HDFCBANK.NS", "proxy": "HDFCBANK.NS", "lot_size": 550, "future_underlying": "HDFCBANK"},
-    "Reliance Industries": {"ticker": "RELIANCE.NS", "proxy": "RELIANCE.NS", "lot_size": 250, "future_underlying": "RELIANCE"},
-    "ICICI Bank": {"ticker": "ICICIBANK.NS", "proxy": "ICICIBANK.NS", "lot_size": 700, "future_underlying": "ICICIBANK"},
 }
-
 LOGGER = logging.getLogger("quant_engine")
 YAHOO_TIMEOUT = 10
 YAHOO_INTRADAY_CACHE_TTL = 60
@@ -688,7 +681,60 @@ def get_combined_12m_trades(backtest_trades, path="data/historical_trades.json")
 
 
 def export_trades_to_excel(trades):
+    """Return an Excel workbook with Excel-safe values.
+
+    Excel does not support timezone-aware datetimes. Live/backtest timestamps
+    are intentionally kept in IST elsewhere in the application, so we strip
+    timezone metadata only in this export copy.
+    """
+    if trades is None:
+        return b""
+
+    export_df = trades.copy()
+
+    for column in export_df.columns:
+        series = export_df[column]
+
+        # Native pandas datetime columns.
+        if pd.api.types.is_datetime64_any_dtype(series):
+            if getattr(series.dt, "tz", None) is not None:
+                export_df[column] = series.dt.tz_localize(None)
+            continue
+
+        # Object columns can contain timezone-aware Timestamp objects when
+        # records were assembled from dictionaries.
+        if series.dtype == "object":
+            try:
+                parsed = pd.to_datetime(series, errors="raise")
+                if pd.api.types.is_datetime64_any_dtype(parsed):
+                    if getattr(parsed.dt, "tz", None) is not None:
+                        parsed = parsed.dt.tz_localize(None)
+                    export_df[column] = parsed
+            except (TypeError, ValueError, OverflowError):
+                # Not a datetime-like object column; leave it unchanged.
+                pass
+
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        trades.to_excel(writer, index=False, sheet_name="Trades")
+    with pd.ExcelWriter(
+        output,
+        engine="xlsxwriter",
+        datetime_format="yyyy-mm-dd hh:mm:ss",
+    ) as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Trades")
+
+        worksheet = writer.sheets["Trades"]
+        worksheet.freeze_panes(1, 0)
+        worksheet.autofilter(
+            0,
+            0,
+            max(len(export_df), 1),
+            max(len(export_df.columns) - 1, 0),
+        )
+
+        # Sensible widths without making the workbook enormous.
+        for idx, column in enumerate(export_df.columns):
+            values = export_df[column].astype(str).replace("nan", "")
+            width = min(max(len(str(column)), values.str.len().max() if len(values) else 0) + 2, 28)
+            worksheet.set_column(idx, idx, width)
+
     return output.getvalue()

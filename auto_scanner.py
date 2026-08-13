@@ -82,7 +82,7 @@ def save_state(state):
 def symbols_to_scan():
     requested = os.getenv(
         "SCAN_SYMBOLS",
-        "Nifty 50",
+        "Nifty 50,Bank Nifty",
     )
     names = [
         item.strip()
@@ -94,7 +94,7 @@ def symbols_to_scan():
         for name in names
         if name in SYMBOL_MAP
     ]
-    return valid or ["Nifty 50"]
+    return valid or ["Nifty 50", "Bank Nifty"]
 
 
 def run_scanner():

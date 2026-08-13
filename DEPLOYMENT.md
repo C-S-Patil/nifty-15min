@@ -46,7 +46,7 @@ GitHub Actions repository secrets:
 
 Optional GitHub Actions repository variable:
 
-- `SCAN_SYMBOLS` — defaults to `Nifty 50`; comma-separated names are accepted.
+- `SCAN_SYMBOLS` — defaults to `Nifty 50,Bank Nifty`; only `Nifty 50` and `Bank Nifty` are supported in this release.
 
 ## Live trading
 
@@ -55,3 +55,10 @@ Keep `LIVE_TRADING_ENABLED=false` while validating the new engine.
 The app resolves the nearest non-expired NFO futures contract dynamically and uses the broker-provided lot size. No expired hard-coded futures symbol is used.
 
 The GitHub Actions scanner sends signal-only Telegram alerts; it does not place live orders.
+
+
+## Supported instruments
+
+This release intentionally supports **Nifty 50 and Bank Nifty only**. Stock symbols have been removed from the strategy engine, Streamlit selector, and automated scanner. Stock support will be added as a separate, explicitly validated phase later.
+
+The research and live-execution architecture remains instrument-aware, so adding stocks later will not require redesigning the core engine.
