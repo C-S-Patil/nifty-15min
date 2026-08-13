@@ -157,7 +157,7 @@ rsi_oversold = st.sidebar.slider("RSI Oversold Filter", 25, 45, 38)
 rsi_overbought = st.sidebar.slider("RSI Overbought Filter", 55, 75, 62)
 
 # Load Historical Market Data
-data = fetch_and_prepare_data(ticker=ticker, period="59d", interval="15m")
+data = fetch_and_prepare_data(ticker=ticker, period="1mo", interval="15m")
 
 if data.empty:
     st.error(
